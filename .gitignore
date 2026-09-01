@@ -1,0 +1,44 @@
+# CONFIDENTIAL -- true/exact FIA plot coordinates and anything derived from
+# them. Never remove this line. See git_practices.md Section 8 -- this is a
+# hard legal-confidentiality rule, not a size/reproducibility judgment call
+# like the rest of this file. Also protected by .git/hooks/pre-commit.
+data/confidential/
+
+# Raw and derived data -- never tracked (see git_practices.md Section 7)
+data/raw/
+data/derived/
+*.rds
+*.sqlite
+*.gdb/
+
+# Large rasters over a small demo size -- adjust per project if needed
+*.tif
+*.tiff
+
+# Rendered HTML render output (regenerate from .qmd rather than tracking it).
+# Narrative reports/memos placed directly in docs/ (anything not .html) are
+# tracked normally -- see generic_agent_guidance.md Section 8.
+docs/*.html
+
+# Archived literature -- files only, not the review itself (see
+# generic_agent_guidance.md Section 11)
+publications/*
+!publications/literature_review.md
+
+# NOTE: output/figures/ and output/tables/ are intentionally NOT ignored --
+# small figures/tables actually cited in a manuscript are tracked normally
+# (git_practices.md Section 7). Ignore individual large/regenerable files
+# here on a per-project basis instead of blanket-ignoring the folder.
+
+# R/RStudio artifacts
+.Rproj.user/
+.Rhistory
+.RData
+.Ruserdata
+
+# Claude Code local project settings -- machine-specific, not shared
+.claude/settings.local.json
+
+# OS cruft
+Thumbs.db
+.DS_Store

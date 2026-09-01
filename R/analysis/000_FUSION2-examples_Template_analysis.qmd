@@ -1,0 +1,218 @@
+---
+title: "FUSION2-examples"
+author: "Jacob Strunk"
+date: today
+format:
+  html:
+    theme: flatly
+    toc: true
+    code-fold: true
+    embed-resources: true
+execute:
+  echo: true
+  warning: false
+  message: false
+---
+
+<!--
+Analysis template. Conventions this template follows -- see
+r_coding_standards.md for the full rules:
+  - every chunk is preceded by a "##" heading + one-sentence description
+  - work inside a chunk is broken into a numbered "#N. <step>" sequence,
+    one comment per discrete step (not per line) -- Section 6
+  - repeated logic is wrapped into a named helper function, defined in the
+    "Define helper functions" chunk below, not repeated inline -- Section 6
+  - chunks are discrete and single-purpose
+  - all figures/data/graphs are versioned via RForInvt::file_version()
+  - data loading is gated so it only reruns when source files or the
+    build_version tag change (Section 12 of r_coding_standards.md)
+  - working directory is reset to the project root in its own chunk before
+    setup, since this script lives in R/analysis/ but project-relative
+    paths are written relative to the project root
+-->
+
+# Overview
+
+<!-- State the study objectives as a numbered list. -->
+
+Objectives:
+
+1. <objective one>
+2. <objective two>
+
+# Setup
+
+## Reset working directory to the project root
+
+<!--
+This script lives in R/analysis/ (see the project skeleton), but Quarto
+executes chunks with the working directory set to the .qmd's own folder by
+default -- so project-relative paths like "data/derived" would otherwise
+resolve against R/analysis/, not the project root. This must be its own
+chunk: root.dir only takes effect starting with the chunk after it's set,
+so a dir.create() call in the same chunk as this line would still run
+against the old (wrong) directory.
+-->
+
+```{r}
+#| label: root-dir
+
+knitr::opts_knit$set(root.dir = "../..")
+```
+
+## Load libraries and set default options
+
+```{r}
+#| label: setup
+
+# Core packages for this analysis -- data.table for tabular work, RForInvt
+# for versioning/utility helpers, ggplot2 for figures, sf/terra for spatial.
+library(data.table)
+library(RForInvt)
+library(ggplot2)
+library(sf)
+library(terra)
+
+# Standard chunk defaults for this document.
+knitr::opts_chunk$set(
+    echo      = TRUE
+  , warning   = FALSE
+  , message   = FALSE
+  , fig.width  = 7
+  , fig.height = 5
+  )
+
+options(scipen = 10E6)
+
+# Directories used throughout -- adjust to the project's actual layout.
+dir_derived = "data/derived"
+dir_out     = "output/figures"
+dir.create(dir_derived, recursive = TRUE, showWarnings = FALSE)
+dir.create(dir_out, recursive = TRUE, showWarnings = FALSE)
+```
+
+## Define helper functions used throughout this analysis
+
+<!--
+Wrap any logic called more than once (a shared filter rule, a plotting
+routine reused across chunks) into a named function here, rather than
+repeating it inline -- see r_coding_standards.md Section 6.
+-->
+
+```{r}
+#| label: helper-functions
+
+#1. define a before/after plotting helper reused across Results chunks
+fn_plot_before_after = function(dat_before, dat_after){
+  # replace with the project's actual comparison plot
+  }
+```
+
+# Data
+
+## Load or rebuild the primary dataset
+
+<!--
+Only rebuilds if a source file's size/date changed, or build_version below
+was bumped by hand to signal a real logic change. See
+r_coding_standards.md Section 12 for the plain-language explanation of why
+this is mtime/size + a manual version tag rather than a full code hash.
+-->
+
+```{r}
+#| label: load-primary-data
+
+#1. define paths to the cache and its "fingerprint" sidecar
+cache_rds     = file.path(dir_derived, "dat_primary.rds")
+cache_key_rds = file.path(dir_derived, "dat_primary.key.rds")
+
+#2. list source files this dataset is built from
+#  - any file added here triggers a rebuild if its size or mtime changes
+source_files = c("data/raw/plots.csv", "data/raw/trees.csv")
+
+#3. set the manual build-version tag
+#  - bump this by hand only when the loading/creation logic below
+#    meaningfully changes, not for cosmetic edits like a comment tweak
+build_version = "v1"
+
+#4. compute the current fingerprint (source file size/mtime + version tag)
+current_key = list(
+    sources = file.info(source_files)[, c("size", "mtime")]
+  , version = build_version
+  )
+
+#5. decide whether a rebuild is needed
+#  - stale if the cache/key files are missing, or the fingerprint changed
+needs_rebuild = !file.exists(cache_rds) || !file.exists(cache_key_rds) ||
+  !identical(current_key, readRDS(cache_key_rds))
+
+#6. rebuild if stale, otherwise reload the cached result
+if (needs_rebuild) {
+  # Actual data creation/loading logic goes here.
+  dat = data.table::fread(source_files[1])
+
+  # Save the rebuilt data and its fingerprint for the next run.
+  saveRDS(dat, cache_rds)
+  saveRDS(current_key, cache_key_rds)
+} else {
+  # Nothing changed -- reload the previously saved result.
+  dat = readRDS(cache_rds)
+}
+```
+
+# Methods
+
+## <Describe the method applied in this chunk>
+
+```{r}
+#| label: methods-placeholder
+
+# Replace with the actual method/model code for this analysis.
+```
+
+# Results
+
+## <State the specific result reported in this chunk>
+
+```{r}
+#| label: results-placeholder
+
+# Replace with the code producing this result, following the numbered-step
+# convention (r_coding_standards.md Section 6), e.g.:
+#
+# #1. build the predicted-vs-actual plot
+# #  - axis convention: "truth" (observed/actual/response) goes on y;
+# #    predictions/estimates/explanatory variables go on x -- Section 7
+# p = ggplot(dat, aes(x = predicted, y = actual)) + geom_point() + theme_minimal()
+#
+# #2. save the figure as a versioned .tif, then display it
+# file_tif = RForInvt::file_version(
+#     file.path(dir_out, "result_placeholder.tif")
+#   , increment = TRUE
+#   , note = "initial version"
+#   )
+# ggsave(file_tif, p, device = "tiff")
+# shell.exec(normalizePath(file_tif))
+```
+
+# Discussion
+
+<!-- Interpretation and argument -- active "we" voice, calibrated hedging
+     for claims beyond what the data directly show. -->
+
+# Study Limitations
+
+<!-- Itemized list of study limitations -- required for every
+     manuscript-style output per narrative_style.md Section 6. -->
+
+- <limitation one>
+- <limitation two>
+
+# Session Info
+
+```{r}
+#| label: session-info
+
+# Captured for reproducibility.
+sessionInfo()
+```
