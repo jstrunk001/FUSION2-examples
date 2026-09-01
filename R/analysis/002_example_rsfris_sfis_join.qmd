@@ -1,0 +1,276 @@
+---
+title: "Example WA DNR RSFRIS / SFIS Plot-Tree Join"
+author: "Jacob Strunk"
+date: today
+format: html
+execute:
+  echo: true
+  warning: false
+  message: false
+---
+
+<!--
+Pipeline script -- builds a small, non-confidential example subset of two
+Washington DNR forest inventory programs (RSFRIS and SFIS) and demonstrates
+a plot-tree join and summary. Not a scientific finding, so this follows the
+pipeline template (execution-ordered "# Step N" headings), not the
+manuscript-style analysis template. See
+r_coding_standards.md
+Section 19.
+
+This is independent of 001_example_gridmetrics_lidar_pipeline.qmd -- the WA
+DNR plots used here are not known to overlap the example lidar tile, so
+these are two separate, independently-runnable examples rather than one
+combined lidar-plus-plots workflow.
+-->
+
+# Setup
+
+## Reset working directory to the project root
+
+```{r}
+#| label: root-dir
+
+knitr::opts_knit$set(root.dir = "../..")
+```
+
+## Load libraries and set default options
+
+```{r}
+#| label: setup
+
+library(data.table)
+library(RForInvt)
+
+knitr::opts_chunk$set(
+    echo      = TRUE
+  , warning   = FALSE
+  , message   = FALSE
+  )
+
+options(scipen = 10E6)
+
+# The true, full-size WA DNR source tables live outside this repo -- this
+# example only ever writes a small subset of them into data/raw/dnr/, which
+# is what steps 3+ actually read.
+dir_dnr_source = "<WA DNR source directory>"
+dir_dnr_subset = file.path("data", "raw", "dnr")
+dir_tables     = file.path("output", "tables")
+dir.create(dir_dnr_subset, recursive = TRUE, showWarnings = FALSE)
+dir.create(dir_tables, recursive = TRUE, showWarnings = FALSE)
+
+n_example_plots = 15
+```
+
+## Define helper functions used throughout this pipeline
+
+```{r}
+#| label: helper-functions
+
+#1. define a helper that summarizes a tree-level table into one row per
+#   plot -- reused for both the RSFRIS and SFIS tree tables below
+fn_summarize_trees_by_plot = function(dt_tree, plot_id_col, species_col){
+  dt_tree_i = data.table::copy(dt_tree)
+  data.table::setnames(dt_tree_i, c(plot_id_col, species_col), c("plot_id", "species"))
+  dt_summary = dt_tree_i[
+      , .(
+            n_trees = .N
+          , n_species = data.table::uniqueN(species)
+          , top_species = names(sort(table(species), decreasing = TRUE))[1]
+          )
+      , by = plot_id
+      ]
+  dt_summary
+  }
+```
+
+# Pipeline overview
+
+This pipeline builds a small example subset of two Washington State
+Department of Natural Resources (WA DNR) forest inventory programs --
+RSFRIS (Remote Sensing Forest Resource Inventory System) and SFIS (Stand-
+level Forest Inventory System) -- then demonstrates a plot-level to
+tree-level join within each program.
+
+Steps:
+
+1. Screen the source tables for coordinate fields and record which tables
+   are safe to use in this public example repo.
+2. Build a small (`r n_example_plots`-plot) example subset of the
+   non-coordinate RSFRIS and SFIS tables and commit it to
+   `data/raw/dnr/`.
+3. Load the committed subset and join each program's tree table to its
+   plot-level metrics table, summarizing tree counts and species by plot.
+4. Combine both programs' plot-level summaries into one comparison table.
+
+# Step 1: Screen source tables for coordinate fields
+
+WA DNR plot identifiers in both programs are UUIDs with no public lookup
+back to a real-world location, which is different from the FIA true-
+coordinate case this project's standing guidance otherwise treats as a
+hard never-commit rule (see `git_practices.md` Section 8). That said, two
+of the source tables carry exact projected and/or geographic coordinates
+tied to an identifiable plot or sample point, and are excluded from this
+repo on that basis alone, independent of the UUID/no-lookup point above:
+
+- `RSFRIS_20260819/rsfris_plot_metadata.rds` carries `X`/`Y` projected
+  coordinates keyed by `PLOT_ID` and a human-readable `PLOT_NAME`.
+- `sfis_20250218/shp/SL_SFIS_SAMPLE_POINT.shp` carries `X`/`Y` (state
+  plane feet) and `LON`/`LAT` (decimal degrees, roughly 5 decimal places)
+  keyed by `POINT_ID` and `POINT_NM`.
+
+Neither file is read anywhere in this pipeline, and neither is committed
+to this repo. Everything used below comes from the three RSFRIS/SFIS
+attribute tables confirmed to carry no coordinate columns:
+`rsfris_plot_forest_metrics.rds`, `rsfris_tree.rds`,
+`sfis_plot_data_20250218.csv`, and `sfis_tree_data_20250218.csv`.
+
+```{r}
+#| label: step-1-screen-coordinates
+
+#1. list the non-coordinate source tables this pipeline is allowed to read
+path_rsfris_metrics = file.path(dir_dnr_source, "RSFRIS_20260819", "rsfris_plot_forest_metrics.rds")
+path_rsfris_tree     = file.path(dir_dnr_source, "RSFRIS_20260819", "rsfris_tree.rds")
+path_sfis_plot       = file.path(dir_dnr_source, "sfis_20250218", "sfis_plot_data_20250218.csv")
+path_sfis_tree       = file.path(dir_dnr_source, "sfis_20250218", "sfis_tree_data_20250218.csv")
+
+#2. guard against ever reading the excluded, coordinate-bearing files by
+#   name -- this is a documentation safeguard, not a substitute for the
+#   screening judgment above
+nms_excluded = c("rsfris_plot_metadata.rds", "SL_SFIS_SAMPLE_POINT.shp")
+cat("Excluded (carry exact coordinates):", paste(nms_excluded, collapse = ", "), "\n")
+```
+
+# Step 2: Build a small example subset of the RSFRIS and SFIS tables
+
+This step samples `r n_example_plots` plots from each program (present in
+both that program's plot-level and tree-level table) and writes the
+subset to `data/raw/dnr/`. It only runs if the subset files are not
+already present -- this is a fixed demo dataset meant to stay stable
+across runs, not a rebuild-on-every-render cache in the sense of
+`r_coding_standards.md` Section 13, since the source tables it reads live
+outside this repo and are not expected to change.
+
+```{r}
+#| label: step-2-build-subset
+
+path_rsfris_metrics_sub = file.path(dir_dnr_subset, "rsfris_plot_forest_metrics_subset.csv")
+path_rsfris_tree_sub    = file.path(dir_dnr_subset, "rsfris_tree_subset.csv")
+path_sfis_plot_sub      = file.path(dir_dnr_subset, "sfis_plot_data_subset.csv")
+path_sfis_tree_sub      = file.path(dir_dnr_subset, "sfis_tree_data_subset.csv")
+
+nms_subset_paths = c(path_rsfris_metrics_sub, path_rsfris_tree_sub, path_sfis_plot_sub, path_sfis_tree_sub)
+
+if(!all(file.exists(nms_subset_paths))){
+
+  set.seed(42)
+
+  #1. load the full RSFRIS non-coordinate tables and sample common plots
+  dt_rsfris_metrics_all = data.table::setDT(readRDS(path_rsfris_metrics))
+  dt_rsfris_tree_all    = data.table::setDT(readRDS(path_rsfris_tree))
+  ids_rsfris_common = intersect(dt_rsfris_metrics_all$PLOT_ID, dt_rsfris_tree_all$PLOT_ID)
+  ids_rsfris_sample = sample(ids_rsfris_common, size = n_example_plots)
+
+  #2. subset and write the RSFRIS example tables
+  dt_rsfris_metrics_sub = dt_rsfris_metrics_all[PLOT_ID %in% ids_rsfris_sample]
+  dt_rsfris_tree_sub    = dt_rsfris_tree_all[PLOT_ID %in% ids_rsfris_sample]
+  data.table::fwrite(dt_rsfris_metrics_sub, path_rsfris_metrics_sub)
+  data.table::fwrite(dt_rsfris_tree_sub, path_rsfris_tree_sub)
+
+  #3. load the full SFIS non-coordinate tables and sample common plots
+  dt_sfis_plot_all = data.table::fread(path_sfis_plot)
+  dt_sfis_tree_all  = data.table::fread(path_sfis_tree)
+  ids_sfis_common = intersect(dt_sfis_plot_all$PLOT_ID, dt_sfis_tree_all$PLOT_ID)
+  ids_sfis_sample = sample(ids_sfis_common, size = n_example_plots)
+
+  #4. subset and write the SFIS example tables
+  dt_sfis_plot_sub = dt_sfis_plot_all[PLOT_ID %in% ids_sfis_sample]
+  dt_sfis_tree_sub  = dt_sfis_tree_all[PLOT_ID %in% ids_sfis_sample]
+  data.table::fwrite(dt_sfis_plot_sub, path_sfis_plot_sub)
+  data.table::fwrite(dt_sfis_tree_sub, path_sfis_tree_sub)
+
+  } else {
+
+  cat("Example subset already present under", dir_dnr_subset, "-- skipping rebuild.\n")
+
+  }
+```
+
+# Step 3: Join each program's tree table to its plot-level metrics
+
+Each program's tree table is summarized to one row per plot (tree count,
+species richness, most common species) using the shared
+`fn_summarize_trees_by_plot()` helper, then left-joined onto that
+program's plot-level metrics table by `plot_id`.
+
+```{r}
+#| label: step-3-join
+
+#1. load the committed example subset
+dt_rsfris_metrics = data.table::fread(path_rsfris_metrics_sub)
+dt_rsfris_tree    = data.table::fread(path_rsfris_tree_sub)
+dt_sfis_plot      = data.table::fread(path_sfis_plot_sub)
+dt_sfis_tree      = data.table::fread(path_sfis_tree_sub)
+
+#2. summarize each program's tree table by plot
+dt_rsfris_tree_summary = fn_summarize_trees_by_plot(dt_rsfris_tree, "PLOT_ID", "SPECIES")
+dt_sfis_tree_summary   = fn_summarize_trees_by_plot(dt_sfis_tree, "PLOT_ID", "SPECIES")
+
+#3. join the tree summary onto each program's plot-level metrics table
+dt_rsfris_joined = merge(
+    dt_rsfris_metrics
+  , dt_rsfris_tree_summary
+  , by.x = "PLOT_ID"
+  , by.y = "plot_id"
+  , all.x = TRUE
+  )
+dt_sfis_joined = merge(
+    dt_sfis_plot
+  , dt_sfis_tree_summary
+  , by.x = "PLOT_ID"
+  , by.y = "plot_id"
+  , all.x = TRUE
+  )
+
+cat("RSFRIS joined plots:", nrow(dt_rsfris_joined), "\n")
+cat("SFIS joined plots:", nrow(dt_sfis_joined), "\n")
+```
+
+# Step 4: Combine both programs' plot-level summaries
+
+Both programs share the same core stand-metric naming (`BA`, `HTMAX`,
+`HT_T100`, `QMD`), so this step selects those columns plus the tree-join
+results from each program's joined table and stacks them into one small
+comparison table.
+
+```{r}
+#| label: step-4-combine
+
+#1. select the common comparison columns from each program's joined table
+nms_common = c("PLOT_ID", "n_trees", "n_species", "top_species", "BA", "HTMAX", "HT_T100", "QMD")
+dt_rsfris_common = dt_rsfris_joined[ , ..nms_common]
+dt_rsfris_common[ , source := "RSFRIS"]
+dt_sfis_common = dt_sfis_joined[ , ..nms_common]
+dt_sfis_common[ , source := "SFIS"]
+
+#2. combine into one comparison table
+dt_combined = data.table::rbindlist(list(dt_rsfris_common, dt_sfis_common))
+data.table::setcolorder(dt_combined, c("source", "PLOT_ID", "n_trees", "n_species", "top_species", "BA", "HTMAX", "HT_T100", "QMD"))
+print(dt_combined)
+
+#3. save the combined comparison table as a small, tracked output
+path_combined_table = RForInvt::file_version(
+    file.path(dir_tables, "dnr_example_plot_summary.csv")
+  , increment = TRUE
+  , note = "example RSFRIS/SFIS plot-tree join and summary"
+  )
+data.table::fwrite(dt_combined, path_combined_table)
+```
+
+# Session Info
+
+```{r}
+#| label: session-info
+
+sessionInfo()
+```
