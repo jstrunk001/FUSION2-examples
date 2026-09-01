@@ -4,12 +4,26 @@
 # like the rest of this file. Also protected by .git/hooks/pre-commit.
 data/confidential/
 
-# Raw and derived data -- never tracked (see git_practices.md Section 7)
-data/raw/
+# Raw and derived data -- never tracked (see git_practices.md Section 7).
+# data/raw/* (not "data/raw/") is deliberate -- git cannot re-include
+# content below a directory ignored via a trailing-slash pattern, so the
+# curated-example exceptions right below need to match individual entries
+# under data/raw/ instead of the directory itself.
+data/raw/*
 data/derived/
 *.rds
 *.sqlite
 *.gdb/
+
+# Exception: small, curated example datasets this repo exists to ship --
+# a public USGS 3DEP lidar tile clipped to a demo size, and a small
+# non-confidential subset of WA DNR RSFRIS/SFIS attribute tables (no
+# coordinate fields -- see the source tables' own screening notes in
+# R/analysis/002_example_rsfris_sfis_join.qmd).
+!data/raw/lidar/
+!data/raw/lidar/**
+!data/raw/dnr/
+!data/raw/dnr/**
 
 # Large rasters over a small demo size -- adjust per project if needed
 *.tif
@@ -17,8 +31,11 @@ data/derived/
 
 # Rendered HTML render output (regenerate from .qmd rather than tracking it).
 # Narrative reports/memos placed directly in docs/ (anything not .html) are
-# tracked normally -- see generic_agent_guidance.md Section 8.
+# tracked normally -- see generic_agent_guidance.md Section 8. *_files/ is
+# Quarto's supporting-asset folder for a non-self-contained HTML render
+# (bootstrap/JS libraries) -- also regenerable, not narrative content.
 docs/*.html
+docs/*_files/
 
 # Archived literature -- files only, not the review itself (see
 # generic_agent_guidance.md Section 11)

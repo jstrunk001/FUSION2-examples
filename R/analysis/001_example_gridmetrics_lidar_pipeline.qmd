@@ -1,0 +1,326 @@
+---
+title: "Example FUSION2 Lidar Pipeline: Ground Filter, Canopy Model, Grid Metrics"
+author: "Jacob Strunk"
+date: today
+format: html
+execute:
+  echo: true
+  warning: false
+  message: false
+---
+
+<!--
+Pipeline script -- runs an ordered sequence of FUSION2 command-line tools
+against a small example lidar point cloud tile. Not a scientific finding, so
+this follows the pipeline template (execution-ordered "# Step N" headings),
+not the manuscript-style analysis template. See
+r_coding_standards.md
+Section 19.
+-->
+
+# Setup
+
+## Reset working directory to the project root
+
+<!--
+This script lives in R/analysis/, but Quarto executes chunks with the
+working directory set to the .qmd's own folder by default -- so
+project-relative paths like "data/raw" would otherwise resolve against
+R/analysis/, not the project root. root.dir only takes effect starting
+with the chunk after it is set.
+-->
+
+```{r}
+#| label: root-dir
+
+knitr::opts_knit$set(root.dir = "../..")
+```
+
+## Load libraries and set default options
+
+```{r}
+#| label: setup
+
+# data.table for the small metrics summary table; terra for reading back
+# and previewing the GeoTIFF rasters the FUSION2 tools write; RForInvt for
+# output versioning; ggplot2 for the one preview figure.
+library(data.table)
+library(terra)
+library(RForInvt)
+library(ggplot2)
+
+knitr::opts_chunk$set(
+    echo      = TRUE
+  , warning   = FALSE
+  , message   = FALSE
+  )
+
+options(scipen = 10E6)
+
+# Directories used throughout this pipeline.
+dir_lidar_raw = file.path("data", "raw", "lidar")
+dir_derived   = file.path("data", "derived", "lidar_example")
+dir_tables    = file.path("output", "tables")
+dir.create(dir_derived, recursive = TRUE, showWarnings = FALSE)
+dir.create(dir_tables, recursive = TRUE, showWarnings = FALSE)
+
+# The compiled FUSION2 CLI tools live in the sibling FUSION2 repo's bin/
+# folder -- this example repo calls the already-built executables, it does
+# not build them.
+dir_fusion_bin = "<FUSION2 bin directory>"
+path_groundfilter = file.path(dir_fusion_bin, "groundfilter.exe")
+path_canopymodel  = file.path(dir_fusion_bin, "canopymodel.exe")
+path_gridmetrics  = file.path(dir_fusion_bin, "gridmetrics.exe")
+
+# The small example point cloud tile this pipeline runs against. See the
+# "Pipeline overview" section below for how it was sourced and reduced.
+path_las_example = file.path(
+    dir_lidar_raw
+  , "USGS_LPC_WA_6County_A24_w2049750n409500_clip200ft_las12.las"
+  )
+if(!file.exists(path_las_example)) stop("Example lidar tile not found at ", path_las_example)
+```
+
+## Define helper functions used throughout this pipeline
+
+```{r}
+#| label: helper-functions
+
+#1. define a helper that runs one FUSION2 CLI tool and reports what happened
+#  - wraps system2() in try() per r_coding_standards.md Section 16 (no
+#    tryCatch())
+#  - returns the captured console output invisibly, and stops with a clear
+#    message if the tool exits with a non-zero status
+fn_run_fusion_tool = function(exe_path, args, tool_label){
+  if(!file.exists(exe_path)) stop("FUSION2 tool not found: ", exe_path)
+  result = try(
+      system2(exe_path, args = args, stdout = TRUE, stderr = TRUE)
+    , silent = TRUE
+    )
+  exit_status = attr(result, "status")
+  has_error   = inherits(result, "try-error") || (!is.null(exit_status) && exit_status != 0)
+  cat(paste(result, collapse = "\n"), "\n")
+  if(has_error) stop(tool_label, " exited with an error -- see console output above.")
+  invisible(result)
+  }
+
+#2. define a helper that summarizes one GeoTIFF raster's cell values into a
+#   single-row data.table -- reused across the three rasters this pipeline
+#   produces
+fn_summarize_raster = function(path_raster, layer_name){
+  r = terra::rast(path_raster)
+  v = terra::values(r[[layer_name]])
+  data.table::data.table(
+      layer   = layer_name
+    , n_cells = length(v)
+    , n_na    = sum(is.na(v))
+    , min_val = min(v, na.rm = TRUE)
+    , mean_val = mean(v, na.rm = TRUE)
+    , max_val = max(v, na.rm = TRUE)
+    )
+  }
+```
+
+# Pipeline overview
+
+This pipeline demonstrates a standard ground-classification-to-metrics
+lidar workflow using three FUSION2 command-line tools -- `groundfilter`,
+`canopymodel`, and `gridmetrics` -- against one small, real example point
+cloud tile.
+
+**Example tile source.** The input tile is a small clip of a public USGS
+3DEP lidar point cloud, project `WA_6County_A24`, tile
+`w2049750n409500`, published 2026-07-02 at
+`https://rockyweb.usgs.gov/vdelivery/Datasets/Staged/Elevation/LPC/Projects/WA_6County_A24/WA_6County_1_A24/LAZ/USGS_LPC_WA_6County_A24_w2049750n409500.laz`.
+USGS 3DEP lidar point clouds are a U.S. government work product and are in
+the public domain. The full tile (2250 x 2250 ft, roughly 6.1 million
+points, 23.8 MB compressed) was clipped down to a 200 x 200 ft area near
+the tile center (51,737 points) and converted from its native LAS 1.4
+point format 6 to LAS 1.2 point format 0, then committed to
+`data/raw/lidar/` at roughly 1 MB. The projected coordinate system is
+NAD83(HARN) / Washington South (ftUS), EPSG:2927, vertical datum NAVD88
+(ftUS, Geoid18).
+
+**Point format note.** The current FUSION2 build's point-cloud readers
+return empty results (zero points, all-NA output rasters) on this tile's
+native LAZ-compressed, LAS 1.4 point format 6 encoding, but read the same
+points correctly once decompressed and re-encoded as LAS 1.2 point format
+0 -- confirmed against this same build's own `test_output/` artifacts,
+which show the identical all-NA pattern on a point format 6 input. The
+committed example tile therefore ships in LAS 1.2 point format 0 so this
+pipeline runs cleanly against the current build; no FUSION2 source code was
+changed to arrive at this workaround.
+
+Steps:
+
+1. Classify ground points and build a ground surface DEM (`groundfilter`).
+2. Build a canopy height model from the point cloud and ground DEM
+   (`canopymodel`).
+3. Compute a grid of lidar elevation and canopy metrics (`gridmetrics`).
+4. Summarize the three derived rasters into one small metrics table and
+   preview the canopy height model.
+
+# Step 1: Classify ground points and build a ground surface DEM
+
+`groundfilter` separates ground returns from the rest of the point cloud
+and interpolates them into a ground surface raster, which the next two
+steps use to normalize point and canopy heights above ground.
+
+```{r}
+#| label: step-1-groundfilter
+
+#1. mint a versioned output path for the ground DEM
+path_ground_dem = RForInvt::file_version(
+    file.path(dir_derived, "ground_dem.tif")
+  , increment = TRUE
+  , note = "ground DEM from example 200x200 ft lidar clip"
+  )
+
+#2. run groundfilter against the example tile
+fn_run_fusion_tool(
+    path_groundfilter
+  , args = c(
+        path_las_example
+      , paste0("/output-dem:", path_ground_dem)
+      , "/cellsize:5"
+      )
+  , tool_label = "groundfilter"
+  )
+```
+
+# Step 2: Build a canopy height model
+
+`canopymodel` builds a top-of-canopy surface from the point cloud and
+normalizes it to height above ground using the DEM from Step 1.
+
+```{r}
+#| label: step-2-canopymodel
+
+#1. mint a versioned output path for the canopy height model
+path_chm = RForInvt::file_version(
+    file.path(dir_derived, "chm.tif")
+  , increment = TRUE
+  , note = "canopy height model from example 200x200 ft lidar clip"
+  )
+
+#2. run canopymodel against the example tile, using Step 1's ground DEM
+fn_run_fusion_tool(
+    path_canopymodel
+  , args = c(
+        path_las_example
+      , paste0("/output:", path_chm)
+      , paste0("/ground:", path_ground_dem)
+      , "/cellsize:5"
+      )
+  , tool_label = "canopymodel"
+  )
+```
+
+# Step 3: Compute a grid of lidar elevation and canopy metrics
+
+`gridmetrics` computes a multi-band raster of standard lidar metrics
+(mean and standard deviation of elevation, the 95th height percentile,
+canopy cover, and point density) over the example tile, again normalized
+using Step 1's ground DEM.
+
+```{r}
+#| label: step-3-gridmetrics
+
+#1. gridmetrics writes its own output filename into outdir, based on the
+#   input file's name -- point it at a dedicated subfolder so the result
+#   is easy to find and version
+dir_gridmetrics_out = file.path(dir_derived, "gridmetrics")
+dir.create(dir_gridmetrics_out, recursive = TRUE, showWarnings = FALSE)
+
+#2. run gridmetrics against the example tile
+fn_run_fusion_tool(
+    path_gridmetrics
+  , args = c(
+        path_las_example
+      , paste0("/ground:", path_ground_dem)
+      , "/cellsize:10"
+      , paste0("/outdir:", dir_gridmetrics_out)
+      )
+  , tool_label = "gridmetrics"
+  )
+
+#3. mint a versioned copy of the resulting raster at a stable name
+path_gridmetrics_raw = list.files(
+    dir_gridmetrics_out
+  , pattern = "_gridmetrics\\.tif$"
+  , full.names = TRUE
+  )[1]
+path_gridmetrics = RForInvt::file_version(
+    file.path(dir_derived, "gridmetrics.tif")
+  , increment = TRUE
+  , note = "gridmetrics raster from example 200x200 ft lidar clip"
+  )
+file.copy(path_gridmetrics_raw, path_gridmetrics, overwrite = TRUE)
+```
+
+# Step 4: Summarize the derived rasters and preview the canopy height model
+
+This step confirms the three rasters carry real, non-empty values (not
+just placeholder output), then saves a small summary table and a quick
+preview figure of the canopy height model.
+
+```{r}
+#| label: step-4-summarize
+
+#1. summarize each raster's cell values into one small comparison table
+dt_summary = data.table::rbindlist(list(
+    fn_summarize_raster(path_ground_dem, "ground_elevation")
+  , fn_summarize_raster(path_chm, "canopy_height")
+  , fn_summarize_raster(path_gridmetrics, "elev_mean")
+  , fn_summarize_raster(path_gridmetrics, "canopy_cover")
+  , fn_summarize_raster(path_gridmetrics, "point_density")
+  ))
+print(dt_summary)
+
+#2. save the summary table as a small, tracked output
+path_summary_table = RForInvt::file_version(
+    file.path(dir_tables, "lidar_example_raster_summary.csv")
+  , increment = TRUE
+  , note = "raster summary stats for the example lidar pipeline"
+  )
+data.table::fwrite(dt_summary, path_summary_table)
+
+#3. build a quick preview plot of the canopy height model
+#  - the current FUSION2 build does not attach a coordinate reference or
+#    real-world extent to its GeoTIFF output (cell indices only), so this
+#    preview uses relative grid coordinates rather than the tile's true
+#    projected coordinates
+r_chm = terra::rast(path_chm)
+df_chm = as.data.frame(r_chm, xy = TRUE)
+names(df_chm) = c("x", "y", "canopy_height_ft")
+
+p_chm = ggplot2::ggplot(df_chm, ggplot2::aes(x = x, y = y, fill = canopy_height_ft)) +
+  ggplot2::geom_raster() +
+  ggplot2::scale_fill_viridis_c(name = "Canopy height (ft)") +
+  ggplot2::coord_equal() +
+  ggplot2::labs(
+      title = "Example canopy height model"
+    , subtitle = "USGS 3DEP tile WA_6County_A24, w2049750n409500 -- 200 x 200 ft clip"
+    , x = "Grid column (relative)"
+    , y = "Grid row (relative)"
+    ) +
+  ggplot2::theme_minimal(base_size = 12)
+
+#4. save the preview figure through the standard versioned-figure path and
+#   display it immediately
+path_chm_preview = RForInvt::file_version(
+    file.path(dir_derived, "chm_preview.tif")
+  , increment = TRUE
+  , note = "quick-look preview plot of the example canopy height model"
+  )
+ggplot2::ggsave(path_chm_preview, p_chm, device = "tiff", width = 6, height = 5)
+shell.exec(normalizePath(path_chm_preview))
+```
+
+# Session Info
+
+```{r}
+#| label: session-info
+
+sessionInfo()
+```

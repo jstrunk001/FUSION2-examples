@@ -20,9 +20,19 @@ tool's source history.
 
 ## Data
 
-- `data/raw/` -- small example lidar tiles and a subset of Washington DNR
-  RSFRIS plot data and SFIS stand data (public/example-safe, no true
-  confidential coordinates -- see `data/confidential/` below).
+- `data/raw/lidar/` -- one small (roughly 1 MB) example lidar tile: a
+  200 x 200 ft clip of a public USGS 3DEP point cloud, project
+  `WA_6County_A24`, tile `w2049750n409500`. See
+  `R/analysis/001_example_gridmetrics_lidar_pipeline.qmd` for the full
+  source URL, acquisition date, and the format conversion applied.
+- `data/raw/dnr/` -- a small (15-plot) example subset of two Washington
+  DNR forest inventory programs, RSFRIS and SFIS, covering only the
+  plot-level and tree-level attribute tables (no coordinate columns). See
+  `R/analysis/002_example_rsfris_sfis_join.qmd` Step 1 for the screening
+  that confirmed this, and for the two source tables (a plot-metadata
+  table and a sample-point shapefile, both carrying exact coordinates)
+  that were deliberately excluded and are not committed anywhere in this
+  repo.
 - `data/confidential/` -- reserved for any true/exact plot coordinates,
   should they ever be needed; gitignored and blocked at commit time by
   `.git/hooks/pre-commit`. Not expected to be used in this repo.
