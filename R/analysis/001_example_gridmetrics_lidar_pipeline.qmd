@@ -71,6 +71,7 @@ dir_fusion_bin = "<FUSION2 bin directory>"
 path_groundfilter = file.path(dir_fusion_bin, "groundfilter.exe")
 path_canopymodel  = file.path(dir_fusion_bin, "canopymodel.exe")
 path_gridmetrics  = file.path(dir_fusion_bin, "gridmetrics.exe")
+path_cloudmetrics = file.path(dir_fusion_bin, "cloudmetrics.exe")
 
 # The small example point cloud tile this pipeline runs against. See the
 # "Pipeline overview" section below for how it was sourced and reduced.
@@ -177,11 +178,15 @@ path_ground_dem = RForInvt::file_version(
   )
 
 #2. run groundfilter against the example tile
+#  - the CLI-harmonization pass renamed this flag from /output-dem: to
+#    /output-raster:; the old name is still silently accepted (exit 0)
+#    but produces no output file at all, so this was previously a silent
+#    no-op -- confirmed by direct testing against the current build
 fn_run_fusion_tool(
     path_groundfilter
   , args = c(
         path_las_example
-      , paste0("/output-dem:", path_ground_dem)
+      , paste0("/output-raster:", path_ground_dem)
       , "/cellsize:5"
       )
   , tool_label = "groundfilter"
@@ -315,6 +320,36 @@ path_chm_preview = RForInvt::file_version(
   )
 ggplot2::ggsave(path_chm_preview, p_chm, device = "tiff", width = 6, height = 5)
 shell.exec(normalizePath(path_chm_preview))
+```
+
+# Step 5: Compute summary plot and clip metrics with `cloudmetrics`
+
+`cloudmetrics` computes statistical summaries (elevation percentiles, canopy cover, canopy relief ratio, and standard deviations) for a point cloud file or directory of files, with optional height normalization against a ground DTM raster or directory of DTM tiles.
+
+```{r}
+#| label: step-5-cloudmetrics
+
+#1. run cloudmetrics on the example LAS file with ground DTM height normalization
+path_cloudmetrics_out = RForInvt::file_version(
+    file.path(dir_tables, "cloudmetrics_normalized.csv")
+  , increment = TRUE
+  , note = "cloudmetrics summary metrics with ground DTM normalization"
+  )
+
+fn_run_fusion_tool(
+    path_cloudmetrics
+  , args = c(
+        path_las_example
+      , paste0("/ground:", path_ground_dem)
+      , paste0("/output:", path_cloudmetrics_out)
+      , "/minht:2.0"
+      )
+  , tool_label = "cloudmetrics"
+  )
+
+#2. read back and display the computed metrics
+dt_cloudmetrics = data.table::fread(path_cloudmetrics_out)
+print(dt_cloudmetrics)
 ```
 
 # Session Info

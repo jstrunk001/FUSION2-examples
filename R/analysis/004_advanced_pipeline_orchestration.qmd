@@ -1,0 +1,415 @@
+---
+title: "Advanced FUSION2 Pipeline Orchestration: Resuming, Retrying, and Rebuilding"
+author: "Jacob Strunk"
+date: today
+format: html
+execute:
+  echo: true
+  warning: false
+  message: false
+---
+
+<!--
+Pipeline script -- continues from 003_example_pipeline_orchestrator.qmd's
+Step 5 (/tool:groundfilter) output directory to demonstrate pipeline.exe's
+resume/idempotency behavior, /retryfailed, /rebuild, and its current
+inability to start a chain from a pre-built raster instead of a point
+cloud. Follows the pipeline template (execution-ordered "# Step N"
+headings), not the manuscript-style analysis template, per
+r_coding_standards.md
+Section 19.
+
+Run 003_example_pipeline_orchestrator.qmd first -- Step 3 below reruns its
+Step 5 command verbatim against the same output directory, so this script
+is picking up real, already-recorded state rather than starting cold.
+-->
+
+# Setup
+
+## Reset working directory to the project root
+
+```{r}
+#| label: root-dir
+
+knitr::opts_knit$set(root.dir = "../..")
+```
+
+## Load libraries and set default options
+
+```{r}
+#| label: setup
+
+# data.table for state-manifest parsing and summary tables; RForInvt for
+# output versioning. No raster-reading package is needed here -- every
+# step in this script inspects the state manifest and console output
+# directly rather than the rasters themselves (003 already covers that).
+library(data.table)
+library(RForInvt)
+
+knitr::opts_chunk$set(
+    echo      = TRUE
+  , warning   = FALSE
+  , message   = FALSE
+  )
+
+options(scipen = 10E6)
+
+# Same derived-data folder 003 used -- this script's resume/retry/rebuild
+# steps depend on genuinely picking up the state 003's Step 5 left behind.
+dir_lidar_raw   = file.path("data", "raw", "lidar")
+dir_dtm_raw     = file.path("data", "raw", "lidar_dtm_examples")
+dir_derived     = file.path("data", "derived", "pipeline_example")
+dir_tables      = file.path("output", "tables")
+dir_single_out  = file.path(dir_derived, "single_tool_out")
+dir.create(dir_derived, recursive = TRUE, showWarnings = FALSE)
+dir.create(dir_tables, recursive = TRUE, showWarnings = FALSE)
+
+# The compiled FUSION2 CLI tools live in the sibling FUSION2 repo's bin/
+# folder -- this example repo calls the already-built executables, it does
+# not build them.
+dir_fusion_bin = "<FUSION2 bin directory>"
+path_pipeline  = file.path(dir_fusion_bin, "pipeline.exe")
+path_catalog   = file.path(dir_fusion_bin, "catalog.exe")
+if(!file.exists(path_pipeline)) stop("pipeline.exe not found at ", path_pipeline)
+if(!file.exists(path_catalog)) stop("catalog.exe not found at ", path_catalog)
+
+# The same small example point cloud tile used throughout this repo.
+path_las_example = file.path(
+    dir_lidar_raw
+  , "USGS_LPC_WA_6County_A24_w2049750n409500_clip200ft_las12.las"
+  )
+if(!file.exists(path_las_example)) stop("Example lidar tile not found at ", path_las_example)
+```
+
+## Define helper functions used throughout this pipeline
+
+```{r}
+#| label: helper-functions
+
+#1. define a helper that runs one already-built, literal command-line
+#   string and reports what happened, without stopping the script on
+#   failure -- Step 7's external-DTM rejection is itself the finding, not
+#   something to hide, so this helper returns a result list for the
+#   caller to inspect instead of calling stop()
+#  - the command is printed exactly as a person would type it at a real
+#    terminal; internally it is run with "2>&1" appended (so a rejection
+#    message on stderr, like Step 7 below, is actually captured) and
+#    wrapped in one extra pair of quotes before being handed to shell(),
+#    which is a documented cmd.exe quirk (cmd /c strips a single
+#    leading/trailing quote pair from a command line that contains more
+#    than one quoted segment) -- both are R/Windows plumbing details, not
+#    part of pipeline.exe's own syntax, so they are kept out of the
+#    printed command text entirely
+fn_run_cmd = function(cmd, run_label){
+  cat(run_label, "-- command:\n  ", cmd, "\n\n", sep = "")
+  result = try(shell(paste0('"', cmd, ' 2>&1', '"'), intern = TRUE), silent = TRUE)
+  exit_status = attr(result, "status")
+  exit_status = if(is.null(exit_status)) 0L else exit_status
+  console_text = if(inherits(result, "try-error")) as.character(result) else result
+  cat(run_label, "-- console output:\n")
+  cat(paste(console_text, collapse = "\n"), "\n\n")
+  list(
+      label     = run_label
+    , exit_code = exit_status
+    , succeeded = identical(exit_status, 0L)
+    , console   = console_text
+    )
+  }
+
+#2. define a helper that reads a pipeline.exe run's state manifest
+#   (_processing/pipeline_state.csv) into a data.table, returning an empty
+#   0-row table with the expected columns if the run never got far enough
+#   to write one
+fn_read_pipeline_state = function(dir_output){
+  path_state = file.path(dir_output, "_processing", "pipeline_state.csv")
+  state_cols = c("tile", "stage", "status", "output_path", "exit_code", "started_at", "finished_at")
+  if(!file.exists(path_state)) return(data.table::data.table(matrix(character(0), ncol = length(state_cols), dimnames = list(NULL, state_cols))))
+  data.table::fread(path_state, colClasses = "character")
+  }
+```
+
+# Pipeline overview
+
+`003_example_pipeline_orchestrator.qmd` covers the shape of every valid
+`pipeline.exe` invocation. This script covers what happens when the same
+command runs more than once against the same output directory -- the
+resume/idempotency behavior, `/retryfailed`, and `/rebuild` -- and one
+real gap in what `pipeline.exe` can currently start a chain from.
+
+**Example inputs.** The point-cloud input is the same small (`~1 MB`, 200 x
+200 ft, 51,737-point) clip of a public USGS 3DEP lidar tile used
+throughout this repo. The external-DTM input used in Step 7 is a set of
+seven small (`~1 MB` each) real USGS 3DEP bare-earth lidar DTMs, one per
+Washington forest-type study site (subalpine Cascades, dry east-side,
+west-side plantation, old-growth rainforest, and three others), pulled
+from the `2026_Compare_DSMs` analysis project's cached, real (not
+synthetic) lidar reference rasters -- see `data/raw/lidar_dtm_examples/`
+and its per-site subfolders.
+
+# Step 1: Stage the example inputs into their own input directories
+
+Re-stages the point cloud (`file.copy(..., overwrite = TRUE)` is a no-op
+if 003 already staged it) and flattens the seven per-site DTM rasters into
+one directory with unique filenames for Step 7.
+
+```{r}
+#| label: step-1-stage-inputs
+
+#1. stage the point cloud into its own input directory
+dir_las_input = file.path(dir_derived, "las_input")
+dir.create(dir_las_input, recursive = TRUE, showWarnings = FALSE)
+file.copy(path_las_example, dir_las_input, overwrite = TRUE)
+
+#2. flatten the seven per-site DTM rasters into one directory, renamed by
+#   site so pipeline.exe sees seven distinct input files rather than seven
+#   files that all share the name "usgs_lidar_dtm.tif"
+dir_dtm_input = file.path(dir_derived, "dtm_input")
+dir.create(dir_dtm_input, recursive = TRUE, showWarnings = FALSE)
+dirs_dtm_site = list.dirs(dir_dtm_raw, full.names = TRUE, recursive = FALSE)
+for(dir_site_i in dirs_dtm_site){
+  site_id_i = basename(dir_site_i)
+  file.copy(
+      file.path(dir_site_i, "usgs_lidar_dtm.tif")
+    , file.path(dir_dtm_input, paste0(site_id_i, ".tif"))
+    , overwrite = TRUE
+    )
+  }
+cat("Staged", length(list.files(dir_dtm_input)), "site DTMs into", dir_dtm_input, "\n")
+```
+
+# Step 2: Determine the point cloud's real project extent
+
+Same extent-detection step 003 uses, repeated here so this script can run
+on its own.
+
+```{r}
+#| label: step-2-real-extent
+
+#1. run catalog.exe against the staged input directory
+path_catalog_report = file.path(dir_derived, "catalog_report.csv")
+cmd_catalog = sprintf(
+    '"%s" "%s" /output:"%s"'
+  , path_catalog, dir_las_input, path_catalog_report
+  )
+result_catalog = fn_run_cmd(cmd_catalog, "Step 2: catalog.exe")
+dt_catalog = data.table::fread(path_catalog_report)
+print(dt_catalog)
+
+#2. pull the real bounding box out of catalog.exe's report
+extent_las = c(
+    xmin = dt_catalog$MinX[1], ymin = dt_catalog$MinY[1]
+  , xmax = dt_catalog$MaxX[1], ymax = dt_catalog$MaxY[1]
+  )
+cat("Real extent read from catalog.exe:\n")
+print(extent_las)
+
+#3. build the /extent: argument string below expects
+arg_extent   = paste0(
+    "/extent:", extent_las["xmin"], ",", extent_las["ymin"]
+  , ",", extent_las["xmax"], ",", extent_las["ymax"]
+  )
+arg_tilesize = "/tilesize:300,300"
+```
+
+# Step 3: Establish the baseline -- 003's single-tool groundfilter run
+
+This is 003's Step 5 command, unchanged, against the same output
+directory. If 003 already ran, this rerun is itself a first live example
+of resume behavior (see Step 4 for a version that measures it directly);
+if not, this establishes the state Steps 4-6 below build on.
+
+```{r}
+#| label: step-3-baseline
+
+dir.create(dir_single_out, recursive = TRUE, showWarnings = FALSE)
+
+cmd_groundfilter_single = sprintf(
+    '"%s" /tool:groundfilter /input:"%s" /output:"%s" %s %s /buffer:25 /cellsize:5'
+  , path_pipeline, dir_las_input, dir_single_out, arg_extent, arg_tilesize
+  )
+result_baseline = fn_run_cmd(
+    cmd_groundfilter_single
+  , "Step 3: baseline (/tool:groundfilter)"
+  )
+print(fn_read_pipeline_state(dir_single_out))
+```
+
+# Step 4: Resume behavior -- rerunning the same command
+
+Per `docs/PIPELINE_GUIDE.md` Section 8, re-running the exact same command
+should be safe and cheap: any tile/stage already recorded `done` (with its
+output file still present) is skipped. This step reruns Step 3's exact
+command unchanged and compares the two state manifests.
+
+```{r}
+#| label: step-4-resume
+
+#1. capture the state manifest's finished_at timestamps before the rerun
+dt_state_before_rerun = fn_read_pipeline_state(dir_single_out)
+
+#2. rerun the identical command from Step 3
+result_rerun = fn_run_cmd(
+    cmd_groundfilter_single
+  , "Step 4: resume -- identical rerun of Step 3's command"
+  )
+
+#3. compare state before/after -- a stage whose recorded status was
+#   already "done" and whose finished_at timestamp is unchanged was
+#   genuinely skipped rather than silently redone
+dt_state_after_rerun = fn_read_pipeline_state(dir_single_out)
+dt_compare_rerun = merge(
+    dt_state_before_rerun[, .(tile, stage, status_before = status, finished_before = finished_at)]
+  , dt_state_after_rerun[, .(tile, stage, status_after = status, finished_after = finished_at)]
+  , by = c("tile", "stage"), all = TRUE
+  )
+print(dt_compare_rerun)
+```
+
+# Step 5: `/retryfailed` -- retrying only the tiles/stages that failed
+
+`/retryfailed` processes only tiles with a recorded failed stage, leaving
+any already-`done` stages untouched.
+
+```{r}
+#| label: step-5-retryfailed
+
+cmd_retryfailed = paste(cmd_groundfilter_single, "/retryfailed")
+result_retryfailed = fn_run_cmd(cmd_retryfailed, "Step 5: /retryfailed")
+print(fn_read_pipeline_state(dir_single_out))
+```
+
+# Step 6: `/rebuild` -- forcing every tile/stage to redo regardless of state
+
+`/rebuild` ignores recorded state entirely and redoes every tile/stage,
+regardless of whether it was already marked `done`.
+
+```{r}
+#| label: step-6-rebuild
+
+dt_state_before_rebuild = fn_read_pipeline_state(dir_single_out)
+
+cmd_rebuild = paste(cmd_groundfilter_single, "/rebuild")
+result_rebuild = fn_run_cmd(cmd_rebuild, "Step 6: /rebuild")
+
+dt_state_after_rebuild = fn_read_pipeline_state(dir_single_out)
+dt_compare_rebuild = merge(
+    dt_state_before_rebuild[, .(tile, stage, finished_before = finished_at)]
+  , dt_state_after_rebuild[, .(tile, stage, finished_after = finished_at)]
+  , by = c("tile", "stage"), all = TRUE
+  )
+cat("A stage genuinely rebuilt under /rebuild has a finished_after timestamp\n")
+cat("later than finished_before, even though it was already 'done'.\n")
+print(dt_compare_rebuild)
+```
+
+# Step 7: Feeding `pipeline.exe` an independently-sourced external DTM
+
+Every scenario in this repo so far starts from a raw point cloud, because
+that is currently the only input `pipeline.exe` accepts -- by design, the
+first stage in any chain must consume a point cloud
+(`docs/PIPELINE_GUIDE.md` Section 9, rule 1). This step demonstrates the
+workflow this project actually needs next: running a raster-consuming
+tool (`topometrics`, computing slope/aspect) directly against a set of
+independently-sourced, already-built DTM rasters -- the seven real USGS
+3DEP lidar bare-earth DTMs staged in Step 1 -- with no point cloud
+involved at all.
+
+**Known limitation (open defect, not yet fixed, confirmed by direct
+testing).** `pipeline.exe` currently rejects this outright:
+
+```
+Error: The first pipeline stage must consume a point cloud (gridmetrics,
+canopymodel, groundfilter, returndensity, filterdata, or thindata) --
+"topometrics" expects a raster as input, and no raster exists yet at the
+start of a tile.
+```
+
+This is a real gap, not a usage mistake: there is currently no way to
+start a `pipeline.exe` chain from a pre-built raster instead of a point
+cloud, even for a tool like `topometrics` whose only input is a raster.
+The command below is written as the fix is expected to make it work --
+`/input:` pointing at a directory of GeoTIFF rasters instead of LAS/LAZ
+files, with each raster treated as one pre-built tile (skipping the usual
+point-cloud buffered-clip step for that tile) -- so once that support
+lands, re-running this exact chunk should turn today's rejection into
+seven real slope/aspect rasters, one per Washington forest-type site.
+
+```{r}
+#| label: step-7-external-dtm
+
+dir_dtm_topo_out = file.path(dir_derived, "external_dtm_topometrics_out")
+dir.create(dir_dtm_topo_out, recursive = TRUE, showWarnings = FALSE)
+
+cmd_external_dtm = sprintf(
+    '"%s" /tool:topometrics /input:"%s" /output:"%s" /merge'
+  , path_pipeline, dir_dtm_input, dir_dtm_topo_out
+  )
+result_external_dtm = fn_run_cmd(
+    cmd_external_dtm
+  , "Step 7: /tool:topometrics against 7 real external lidar DTMs (expected to fail today)"
+  )
+print(fn_read_pipeline_state(dir_dtm_topo_out))
+```
+
+# Step 8: Summarize today's real results
+
+```{r}
+#| label: step-8-summary
+
+#1. assemble one row per scenario, checked against real evidence rather
+#   than just the process exit code -- an exit code of 0 with no output
+#   file present is reported as a failure, not a pass
+dt_status = data.table::data.table(
+    step = c(
+        "3: baseline (/tool:groundfilter)"
+      , "4: resume (identical rerun)"
+      , "5: /retryfailed"
+      , "6: /rebuild"
+      , "7: external DTM input (topometrics)"
+      )
+  , exit_code = c(
+        result_baseline$exit_code, result_rerun$exit_code
+      , result_retryfailed$exit_code, result_rebuild$exit_code
+      , result_external_dtm$exit_code
+      )
+  , expected_output_present = c(
+        file.exists(file.path(dir_single_out, "groundfilter.vrt"))
+      , file.exists(file.path(dir_single_out, "groundfilter.vrt"))
+      , file.exists(file.path(dir_single_out, "groundfilter.vrt"))
+      , file.exists(file.path(dir_single_out, "groundfilter.vrt"))
+      , file.exists(file.path(dir_dtm_topo_out, "topometrics.vrt"))
+      )
+  )
+print(dt_status)
+
+#2. save this status table as a small, tracked, versioned output
+path_status_table = RForInvt::file_version(
+    file.path(dir_tables, "pipeline_orchestration_advanced_status.csv")
+  , increment = TRUE
+  , note = "real pipeline.exe resume/retryfailed/rebuild/external-DTM run status"
+  )
+data.table::fwrite(dt_status, path_status_table)
+```
+
+# Known Limitations
+
+- **`pipeline.exe` cannot start a chain from a pre-built raster.** Every
+  chain must begin with a point-cloud-consuming stage; there is currently
+  no way to hand `pipeline.exe` an already-built DTM and run a
+  raster-only tool like `topometrics` against it -- confirmed by direct
+  testing (Step 7).
+- **No spatial validation between the point-cloud demo tile and the
+  external DTM examples.** The seven DTMs staged in Step 1 are real
+  lidar data from `2026_Compare_DSMs`, but from different Washington
+  sites than the small point-cloud tile used in Steps 3-6 -- they are
+  included to exercise `pipeline.exe`'s external-raster-input handling
+  once it exists, not as a co-located accuracy check against this
+  script's own `groundfilter` output.
+
+# Session Info
+
+```{r}
+#| label: session-info
+
+sessionInfo()
+```

@@ -1,0 +1,526 @@
+---
+title: "Example FUSION2 Pipeline Orchestrator: Running pipeline.exe Across Tools and Chains"
+author: "Jacob Strunk"
+date: today
+format: html
+execute:
+  echo: true
+  warning: false
+  message: false
+---
+
+<!--
+Pipeline script -- runs pipeline.exe (the multi-tool batch orchestrator)
+against real example data through every documented usage pattern:
+gridmetrics.exe's own native batch mode, single-stage /tool: mode, and
+every /pipeline: chain shape in PIPELINE_GUIDE.md. Follows the pipeline
+template (execution-ordered "# Step N" headings), not the manuscript-style
+analysis template, per
+r_coding_standards.md
+Section 19.
+
+Every command below is built as one literal, resolved command-line string
+and printed exactly as a person would type it at a terminal, rather than
+run through an R helper that hides the real invocation inside an R
+argument vector -- this script exists to show FUSION2's own command-line
+syntax plainly, not to demonstrate R orchestration technique.
+
+004_advanced_pipeline_orchestration.qmd continues directly from this
+script's Step 5 output directory to demonstrate resume/retry/rebuild
+behavior and pipeline.exe's current external-DTM limitation -- run this
+script first.
+-->
+
+# Setup
+
+## Reset working directory to the project root
+
+```{r}
+#| label: root-dir
+
+knitr::opts_knit$set(root.dir = "../..")
+```
+
+## Load libraries and set default options
+
+```{r}
+#| label: setup
+
+# data.table for state-manifest parsing and summary tables; terra for
+# reading back GeoTIFF/VRT results; RForInvt for output versioning.
+library(data.table)
+library(terra)
+library(RForInvt)
+
+knitr::opts_chunk$set(
+    echo      = TRUE
+  , warning   = FALSE
+  , message   = FALSE
+  )
+
+options(scipen = 10E6)
+
+# Directories used throughout this pipeline.
+dir_lidar_raw = file.path("data", "raw", "lidar")
+dir_derived   = file.path("data", "derived", "pipeline_example")
+dir_tables    = file.path("output", "tables")
+dir.create(dir_derived, recursive = TRUE, showWarnings = FALSE)
+dir.create(dir_tables, recursive = TRUE, showWarnings = FALSE)
+
+# The compiled FUSION2 CLI tools live in the sibling FUSION2 repo's bin/
+# folder -- this example repo calls the already-built executables, it does
+# not build them.
+dir_fusion_bin   = "<FUSION2 bin directory>"
+path_pipeline    = file.path(dir_fusion_bin, "pipeline.exe")
+path_catalog     = file.path(dir_fusion_bin, "catalog.exe")
+path_gridmetrics = file.path(dir_fusion_bin, "gridmetrics.exe")
+if(!file.exists(path_pipeline)) stop("pipeline.exe not found at ", path_pipeline)
+if(!file.exists(path_catalog)) stop("catalog.exe not found at ", path_catalog)
+if(!file.exists(path_gridmetrics)) stop("gridmetrics.exe not found at ", path_gridmetrics)
+
+# The same small example point cloud tile used by
+# 001_example_gridmetrics_lidar_pipeline.qmd -- see that script's "Pipeline
+# overview" section for the tile's real source URL, acquisition date, and
+# the LAS 1.2 / point format 0 re-encoding applied so the current build's
+# readers return real points rather than an all-NA result.
+path_las_example = file.path(
+    dir_lidar_raw
+  , "USGS_LPC_WA_6County_A24_w2049750n409500_clip200ft_las12.las"
+  )
+if(!file.exists(path_las_example)) stop("Example lidar tile not found at ", path_las_example)
+```
+
+## Define helper functions used throughout this pipeline
+
+```{r}
+#| label: helper-functions
+
+#1. define a helper that runs one already-built, literal command-line
+#   string and reports what happened, without stopping the script on
+#   failure -- a chain below failing would itself be part of the finding,
+#   not something to hide, so this helper reports rather than stop()s
+#  - the command is printed exactly as a person would type it at a real
+#    terminal; internally it is run with "2>&1" appended (so a rejection
+#    message on stderr, like Step 7 below, is actually captured) and
+#    wrapped in one extra pair of quotes before being handed to shell(),
+#    which is a documented cmd.exe quirk (cmd /c strips a single
+#    leading/trailing quote pair from a command line that contains more
+#    than one quoted segment) -- both are R/Windows plumbing details, not
+#    part of pipeline.exe's own syntax, so they are kept out of the
+#    printed command text entirely
+fn_run_cmd = function(cmd, run_label){
+  cat(run_label, "-- command:\n  ", cmd, "\n\n", sep = "")
+  result = try(shell(paste0('"', cmd, ' 2>&1', '"'), intern = TRUE), silent = TRUE)
+  exit_status = attr(result, "status")
+  exit_status = if(is.null(exit_status)) 0L else exit_status
+  console_text = if(inherits(result, "try-error")) as.character(result) else result
+  cat(run_label, "-- console output:\n")
+  cat(paste(console_text, collapse = "\n"), "\n\n")
+  list(
+      label     = run_label
+    , exit_code = exit_status
+    , succeeded = identical(exit_status, 0L)
+    , console   = console_text
+    )
+  }
+
+#2. define a helper that reads a pipeline.exe run's state manifest
+#   (_processing/pipeline_state.csv) into a data.table, returning an empty
+#   0-row table with the expected columns if the run never got far enough
+#   to write one
+fn_read_pipeline_state = function(dir_output){
+  path_state = file.path(dir_output, "_processing", "pipeline_state.csv")
+  state_cols = c("tile", "stage", "status", "output_path", "exit_code", "started_at", "finished_at")
+  if(!file.exists(path_state)) return(data.table::data.table(matrix(character(0), ncol = length(state_cols), dimnames = list(NULL, state_cols))))
+  data.table::fread(path_state, colClasses = "character")
+  }
+
+#3. define a helper that summarizes one GeoTIFF/VRT raster's cell values
+#   into a single-row data.table, returning an all-NA row if the file
+#   doesn't exist rather than erroring -- several steps below check
+#   whether a raster this pipeline run was supposed to produce is actually
+#   present, real, and non-empty
+fn_summarize_raster = function(path_raster, layer_name){
+  if(!file.exists(path_raster)) {
+    return(data.table::data.table(
+        layer = layer_name, n_cells = NA_integer_, n_na = NA_integer_
+      , min_val = NA_real_, mean_val = NA_real_, max_val = NA_real_
+      ))
+    }
+  r = terra::rast(path_raster)
+  layer_i = if(layer_name %in% names(r)) layer_name else 1
+  v = terra::values(r[[layer_i]])
+  data.table::data.table(
+      layer   = layer_name
+    , n_cells = length(v)
+    , n_na    = sum(is.na(v))
+    , min_val = suppressWarnings(min(v, na.rm = TRUE))
+    , mean_val = suppressWarnings(mean(v, na.rm = TRUE))
+    , max_val = suppressWarnings(max(v, na.rm = TRUE))
+    )
+  }
+```
+
+# Pipeline overview
+
+This script works through every documented way of running FUSION2 tools
+across a whole project directory, from `gridmetrics.exe`'s own built-in
+batch mode (no orchestrator at all) up through every `/pipeline:` chain
+shape `pipeline.exe` supports -- the canonical ground/canopy/tree-top
+chain, crown segmentation, terrain metrics, and a point-cloud-only chain
+with no raster stage at all. Every command is shown as the literal,
+resolved text a person would type at a terminal, immediately followed by
+the tool's own real captured console output.
+
+**Example input.** The point-cloud input is the same small (`~1 MB`, 200 x
+200 ft, 51,737-point) clip of a public USGS 3DEP lidar tile used by
+`001_example_gridmetrics_lidar_pipeline.qmd`.
+
+# Step 1: Stage the example input into its own input directory
+
+`pipeline.exe` and `gridmetrics.exe`'s batch mode both require their input
+to be a directory (they tile and buffer every LAS/LAZ file found there),
+not a single file path, so the point cloud tile is copied into its own
+dedicated input folder.
+
+```{r}
+#| label: step-1-stage-input
+
+dir_las_input = file.path(dir_derived, "las_input")
+dir.create(dir_las_input, recursive = TRUE, showWarnings = FALSE)
+file.copy(path_las_example, dir_las_input, overwrite = TRUE)
+cat("Staged", length(list.files(dir_las_input)), "file(s) into", dir_las_input, "\n")
+```
+
+# Step 2: Determine the point cloud's real project extent
+
+Every command below needs `/extent:` -- without it, both `gridmetrics.exe`
+batch mode and `pipeline.exe` default to a large `0,0,5000,5000` project
+grid, which tiles this 200 x 200 ft clip into hundreds of mostly-empty
+tiles. Reading the tile's real extent via `catalog.exe` and passing it
+explicitly avoids that.
+
+```{r}
+#| label: step-2-real-extent
+
+#1. run catalog.exe against the staged input directory, writing its exact
+#   per-file extent stats to a small CSV report
+path_catalog_report = file.path(dir_derived, "catalog_report.csv")
+cmd_catalog = sprintf(
+    '"%s" "%s" /output:"%s"'
+  , path_catalog, dir_las_input, path_catalog_report
+  )
+result_catalog = fn_run_cmd(cmd_catalog, "Step 2: catalog.exe")
+dt_catalog = data.table::fread(path_catalog_report)
+print(dt_catalog)
+
+#2. pull the real bounding box out of catalog.exe's report
+extent_las = c(
+    xmin = dt_catalog$MinX[1], ymin = dt_catalog$MinY[1]
+  , xmax = dt_catalog$MaxX[1], ymax = dt_catalog$MaxY[1]
+  )
+cat("Real extent read from catalog.exe:\n")
+print(extent_las)
+
+#3. build the /extent: argument string every tool below expects
+#   (LLX,LLY,URX,URY), and a tile size comfortably larger than the tile so
+#   this single-tile example produces exactly one tile
+arg_extent   = paste0(
+    "/extent:", extent_las["xmin"], ",", extent_las["ymin"]
+  , ",", extent_las["xmax"], ",", extent_las["ymax"]
+  )
+arg_tilesize = "/tilesize:300,300"
+```
+
+# Step 3: `gridmetrics.exe`'s own batch mode -- no orchestrator needed
+
+If a workflow only ever needs `gridmetrics`, `pipeline.exe` isn't
+required at all: pointing `gridmetrics.exe` directly at a directory
+tiles, buffers, and mosaics the whole project in one built-in batch mode.
+
+```{r}
+#| label: step-3-gridmetrics-batch
+
+dir_gridmetrics_batch_out = file.path(dir_derived, "gridmetrics_batch_out")
+dir.create(dir_gridmetrics_batch_out, recursive = TRUE, showWarnings = FALSE)
+
+cmd_gridmetrics_batch = sprintf(
+    '"%s" "%s" /outdir:"%s" %s %s /buffer:25 /cellsize:10'
+  , path_gridmetrics, dir_las_input, dir_gridmetrics_batch_out
+  , arg_extent, arg_tilesize
+  )
+result_gridmetrics_batch = fn_run_cmd(
+    cmd_gridmetrics_batch
+  , "Step 3: gridmetrics.exe batch mode (no pipeline.exe)"
+  )
+
+path_gridmetrics_batch_vrt = list.files(
+    dir_gridmetrics_batch_out, pattern = "\\.vrt$", full.names = TRUE
+  )[1]
+if(!is.na(path_gridmetrics_batch_vrt)){
+  print(fn_summarize_raster(path_gridmetrics_batch_vrt, "elev_mean"))
+} else {
+  cat("Step 3 did not produce a mosaicked .vrt -- see console output above.\n")
+  }
+```
+
+# Step 4: Single-stage mode, point-cloud output (`/tool:filterdata`)
+
+`/tool:<name>` is shorthand for a single-stage `/pipeline:<name>`, tiling
+and buffering one tool across the whole project with nothing chained after
+it. `filterdata` both reads and writes a point cloud, so this stage
+involves no raster mosaicking at all.
+
+```{r}
+#| label: step-4-single-tool-filterdata
+
+dir_filterdata_out = file.path(dir_derived, "single_tool_filterdata_out")
+dir.create(dir_filterdata_out, recursive = TRUE, showWarnings = FALSE)
+
+cmd_filterdata = sprintf(
+    '"%s" /tool:filterdata /input:"%s" /output:"%s" %s %s /buffer:25 /return:1'
+  , path_pipeline, dir_las_input, dir_filterdata_out, arg_extent, arg_tilesize
+  )
+result_filterdata = fn_run_cmd(
+    cmd_filterdata
+  , "Step 4: single-tool mode, point-cloud output (/tool:filterdata)"
+  )
+print(fn_read_pipeline_state(dir_filterdata_out))
+```
+
+# Step 5: Single-stage mode, raster output (`/tool:groundfilter`)
+
+The same single-stage shorthand, this time with a stage that produces a
+raster (`groundfilter`'s ground DEM), which `pipeline.exe` mosaics and
+crops to each tile's core extent before writing it to `/output`.
+`004_advanced_pipeline_orchestration.qmd` continues directly from this
+step's output directory to demonstrate resume, retry, and rebuild
+behavior -- run this step before that script.
+
+```{r}
+#| label: step-5-single-tool-groundfilter
+
+dir_single_out = file.path(dir_derived, "single_tool_out")
+dir.create(dir_single_out, recursive = TRUE, showWarnings = FALSE)
+
+cmd_groundfilter_single = sprintf(
+    '"%s" /tool:groundfilter /input:"%s" /output:"%s" %s %s /buffer:25 /cellsize:5'
+  , path_pipeline, dir_las_input, dir_single_out, arg_extent, arg_tilesize
+  )
+result_single = fn_run_cmd(
+    cmd_groundfilter_single
+  , "Step 5: single-tool mode, raster output (/tool:groundfilter)"
+  )
+print(fn_read_pipeline_state(dir_single_out))
+```
+
+# Step 6: The canonical chain -- ground filter, canopy model, tree tops
+
+`/pipeline:groundfilter,canopymodel,canopymaxima` buffer-clips the input
+once per tile, runs `groundfilter` to get a ground DEM, runs `canopymodel`
+on the same clip (automatically wired to the DEM `groundfilter` just
+produced) to get a canopy height model, then runs `canopymaxima` on the
+CHM to detect individual tree tops.
+
+```{r}
+#| label: step-6-canonical-chain
+
+dir_canonical_out = file.path(dir_derived, "canonical_chain_out")
+dir.create(dir_canonical_out, recursive = TRUE, showWarnings = FALSE)
+
+cmd_canonical = sprintf(
+    '"%s" /pipeline:groundfilter,canopymodel,canopymaxima /input:"%s" /output:"%s" %s %s /buffer:25 /cellsize:5 /minht:2 /window-a:0.5 /window-b:0.05'
+  , path_pipeline, dir_las_input, dir_canonical_out, arg_extent, arg_tilesize
+  )
+result_canonical = fn_run_cmd(
+    cmd_canonical
+  , "Step 6: canonical chain (groundfilter,canopymodel,canopymaxima)"
+  )
+print(fn_read_pipeline_state(dir_canonical_out))
+
+path_gf_vrt   = file.path(dir_canonical_out, "groundfilter.vrt")
+path_cm_vrt   = file.path(dir_canonical_out, "canopymodel.vrt")
+path_cmax_csv = file.path(dir_canonical_out, "canopymaxima_all.csv")
+if(file.exists(path_gf_vrt) && file.exists(path_cm_vrt)){
+  print(data.table::rbindlist(list(
+      fn_summarize_raster(path_gf_vrt, "ground_elevation")
+    , fn_summarize_raster(path_cm_vrt, "canopy_height")
+    )))
+  dt_treetops = if(file.exists(path_cmax_csv)) data.table::fread(path_cmax_csv) else data.table::data.table()
+  cat("Tree tops detected:", nrow(dt_treetops), "\n")
+} else {
+  cat("Step 6 did not produce groundfilter.vrt / canopymodel.vrt -- see the\n")
+  cat("captured console output and state manifest above for why.\n")
+  }
+```
+
+# Step 7: Crown segmentation instead of tree tops
+
+`/pipeline:groundfilter,canopymodel,treeseg` swaps the last stage for
+watershed crown segmentation, producing a crown-segment raster and a
+per-crown summary table instead of point tree-top locations.
+
+```{r}
+#| label: step-7-crown-segmentation
+
+dir_treeseg_out = file.path(dir_derived, "crown_segmentation_out")
+dir.create(dir_treeseg_out, recursive = TRUE, showWarnings = FALSE)
+
+cmd_treeseg = sprintf(
+    '"%s" /pipeline:groundfilter,canopymodel,treeseg /input:"%s" /output:"%s" %s %s /buffer:25 /cellsize:5 /minht:2'
+  , path_pipeline, dir_las_input, dir_treeseg_out, arg_extent, arg_tilesize
+  )
+result_treeseg = fn_run_cmd(
+    cmd_treeseg
+  , "Step 7: crown segmentation chain (groundfilter,canopymodel,treeseg)"
+  )
+print(fn_read_pipeline_state(dir_treeseg_out))
+
+path_treeseg_vrt = file.path(dir_treeseg_out, "treeseg.vrt")
+path_treeseg_csv = file.path(dir_treeseg_out, "treeseg_table_all.csv")
+if(file.exists(path_treeseg_vrt)){
+  print(fn_summarize_raster(path_treeseg_vrt, "crown_segment_id"))
+  dt_crowns = if(file.exists(path_treeseg_csv)) data.table::fread(path_treeseg_csv) else data.table::data.table()
+  cat("Crowns segmented:", nrow(dt_crowns), "\n")
+} else {
+  cat("Step 7 did not produce treeseg.vrt -- see console output and state manifest above.\n")
+  }
+```
+
+# Step 8: Terrain metrics only
+
+`/pipeline:groundfilter,topometrics` chains just two raster stages --
+`groundfilter`'s DEM feeds directly into `topometrics`, which computes
+slope and aspect. No canopy or tree-level stage is involved at all.
+
+```{r}
+#| label: step-8-terrain-metrics
+
+dir_terrain_out = file.path(dir_derived, "terrain_metrics_out")
+dir.create(dir_terrain_out, recursive = TRUE, showWarnings = FALSE)
+
+cmd_terrain = sprintf(
+    '"%s" /pipeline:groundfilter,topometrics /input:"%s" /output:"%s" %s %s /buffer:25 /cellsize:5'
+  , path_pipeline, dir_las_input, dir_terrain_out, arg_extent, arg_tilesize
+  )
+result_terrain = fn_run_cmd(
+    cmd_terrain
+  , "Step 8: terrain-metrics chain (groundfilter,topometrics)"
+  )
+print(fn_read_pipeline_state(dir_terrain_out))
+
+path_topo_vrt = file.path(dir_terrain_out, "topometrics.vrt")
+if(file.exists(path_topo_vrt)){
+  print(fn_summarize_raster(path_topo_vrt, "slope"))
+} else {
+  cat("Step 8 did not produce topometrics.vrt -- see console output and state manifest above.\n")
+  }
+```
+
+# Step 9: A point-cloud-only chain, with no raster stage at all
+
+`/pipeline:thindata,filterdata,gridmetrics` chains two point-cloud-to-
+point-cloud stages before the raster-producing `gridmetrics` stage.
+`thindata` and `filterdata` feed each other's point-cloud output directly;
+only `gridmetrics`'s final raster gets mosaicked into `/output`. Because
+no `groundfilter` stage precedes it here, `gridmetrics` runs with no
+ground DEM to normalize against -- its output carries raw point
+elevations, not height above ground. `/cellsize` below is forwarded to
+both `thindata` (its thinning grid) and `gridmetrics` (its metrics grid),
+since both stages accept that option.
+
+```{r}
+#| label: step-9-pointcloud-only-chain
+
+dir_pointcloud_out = file.path(dir_derived, "pointcloud_chain_out")
+dir.create(dir_pointcloud_out, recursive = TRUE, showWarnings = FALSE)
+
+cmd_pointcloud_chain = sprintf(
+    '"%s" /pipeline:thindata,filterdata,gridmetrics /input:"%s" /output:"%s" %s %s /buffer:25 /cellsize:5 /return:1'
+  , path_pipeline, dir_las_input, dir_pointcloud_out, arg_extent, arg_tilesize
+  )
+result_pointcloud_chain = fn_run_cmd(
+    cmd_pointcloud_chain
+  , "Step 9: point-cloud-only chain (thindata,filterdata,gridmetrics)"
+  )
+print(fn_read_pipeline_state(dir_pointcloud_out))
+
+path_pc_gridmetrics_vrt = list.files(
+    dir_pointcloud_out, pattern = "\\.vrt$", full.names = TRUE
+  )[1]
+if(!is.na(path_pc_gridmetrics_vrt)){
+  print(fn_summarize_raster(path_pc_gridmetrics_vrt, "elev_mean"))
+} else {
+  cat("Step 9 did not produce a mosaicked gridmetrics .vrt -- see console output above.\n")
+  }
+```
+
+# Step 10: Summarize today's real results
+
+This step consolidates every scenario above into one status table --
+exactly what was checked, and exactly what evidence (exit code, and
+whether the expected output files actually exist on disk) supports each
+row -- rather than a prose claim of success or failure.
+
+```{r}
+#| label: step-10-summary
+
+#1. assemble one row per scenario, checked against real evidence rather
+#   than just the process exit code -- an exit code of 0 with no output
+#   file present is reported as a failure, not a pass
+dt_status = data.table::data.table(
+    step = c(
+        "3: gridmetrics.exe batch mode"
+      , "4: single-tool mode (/tool:filterdata)"
+      , "5: single-tool mode (/tool:groundfilter)"
+      , "6: canonical chain (ground/canopy/treetops)"
+      , "7: crown segmentation chain"
+      , "8: terrain-metrics chain"
+      , "9: point-cloud-only chain"
+      )
+  , exit_code = c(
+        result_gridmetrics_batch$exit_code, result_filterdata$exit_code
+      , result_single$exit_code, result_canonical$exit_code
+      , result_treeseg$exit_code, result_terrain$exit_code
+      , result_pointcloud_chain$exit_code
+      )
+  , expected_output_present = c(
+        !is.na(path_gridmetrics_batch_vrt)
+      , file.exists(file.path(dir_filterdata_out, "_processing", "pipeline_state.csv"))
+      , file.exists(file.path(dir_single_out, "groundfilter.vrt"))
+      , file.exists(file.path(dir_canonical_out, "canopymodel.vrt"))
+      , file.exists(file.path(dir_treeseg_out, "treeseg.vrt"))
+      , file.exists(file.path(dir_terrain_out, "topometrics.vrt"))
+      , !is.na(path_pc_gridmetrics_vrt)
+      )
+  )
+print(dt_status)
+
+#2. save this status table as a small, tracked, versioned output
+path_status_table = RForInvt::file_version(
+    file.path(dir_tables, "pipeline_orchestrator_status.csv")
+  , increment = TRUE
+  , note = "real pipeline.exe run status across gridmetrics batch mode, single-tool mode, and every documented chain shape"
+  )
+data.table::fwrite(dt_status, path_status_table)
+```
+
+# Known Limitations
+
+- **`pipeline.exe`'s tiling engine does not auto-detect the point cloud's
+  extent.** Every command above passes `/extent:` explicitly, read from
+  `catalog.exe`'s report in Step 2; omitting it tiles a large
+  `0,0,5000,5000` default area into hundreds of mostly-empty tiles instead
+  of the one tile this 200 x 200 ft clip actually needs -- confirmed by
+  direct testing.
+- See `004_advanced_pipeline_orchestration.qmd`'s own Known Limitations
+  for `pipeline.exe`'s current inability to start a chain from a
+  pre-built raster instead of a point cloud.
+
+# Session Info
+
+```{r}
+#| label: session-info
+
+sessionInfo()
+```

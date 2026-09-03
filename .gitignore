@@ -25,9 +25,27 @@ data/derived/
 !data/raw/dnr/
 !data/raw/dnr/**
 
+# Exception: small (~1 MB each) real USGS 3DEP lidar bare-earth DTMs for 7
+# Washington forest-type sites, and one representative small raster per
+# other canopy-height source (Meta CHM, NAIP3D DSM, NAIP-CHM) for one of
+# those sites -- pulled from the 2026_Compare_DSMs analysis project. See
+# R/analysis/003_example_pipeline_orchestrator.qmd.
+!data/raw/lidar_dtm_examples/
+!data/raw/lidar_dtm_examples/**
+!data/raw/dsm_source_examples/
+!data/raw/dsm_source_examples/**
+
 # Large rasters over a small demo size -- adjust per project if needed
 *.tif
 *.tiff
+
+# Re-exception: the lidar_dtm_examples/ and dsm_source_examples/ rasters
+# above are themselves .tif files, so the blanket *.tif rule immediately
+# above would otherwise re-exclude them (git evaluates patterns in file
+# order, and a later blanket pattern wins over an earlier directory
+# exception for the same path) -- name the actual files explicitly.
+!data/raw/lidar_dtm_examples/**/*.tif
+!data/raw/dsm_source_examples/**/*.tif
 
 # Rendered HTML render output (regenerate from .qmd rather than tracking it).
 # Narrative reports/memos placed directly in docs/ (anything not .html) are
@@ -36,6 +54,9 @@ data/derived/
 # (bootstrap/JS libraries) -- also regenerable, not narrative content.
 docs/*.html
 docs/*_files/
+R/analysis/*.html
+R/analysis/*_files/
+*.rmarkdown
 
 # Archived literature -- files only, not the review itself (see
 # generic_agent_guidance.md Section 11)

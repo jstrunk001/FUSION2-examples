@@ -13,7 +13,7 @@ tool's source history.
 ## Objectives
 
 1. Demonstrate FUSION2 command-line tools (`gridmetrics`, `clipdata`,
-   `groundfilter`, `canopymodel`, `catalog`, `ltktools`) against real
+   `groundfilter`, `canopymodel`, `catalog`, `pipeline`) against real
    forestry lidar and inventory data.
 2. Provide small, ready-to-run example datasets so a new user can validate
    a FUSION2 build without sourcing their own data first.
@@ -33,6 +33,22 @@ tool's source history.
   table and a sample-point shapefile, both carrying exact coordinates)
   that were deliberately excluded and are not committed anywhere in this
   repo.
+- `data/raw/lidar_dtm_examples/` -- seven small (roughly 1 MB each) real
+  USGS 3DEP bare-earth lidar DTMs, one per Washington forest-type study
+  site (subalpine Cascades, dry east-side, west-side plantation,
+  old-growth rainforest, and three others), pulled from the
+  `2026_Compare_DSMs` analysis project's cached real (not synthetic)
+  lidar reference rasters. Used by
+  `R/analysis/004_advanced_pipeline_orchestration.qmd` Step 7 to exercise
+  `pipeline.exe` against an independently-sourced external DTM instead of
+  a point cloud.
+- `data/raw/dsm_source_examples/site_grays_harbor/` -- one small example
+  raster per non-lidar canopy-height source compared in
+  `2026_Compare_DSMs` (Meta AI CHM, WA State NAIP3D photogrammetric DSM,
+  NAIP-CHM/NTSG neural-net CHM), for the same site as one of the lidar
+  DTM examples above. Staged for future multi-source example scripts;
+  not currently used by any script in this repo, since `pipeline.exe`
+  only accepts lidar point-cloud/DTM input today.
 - `data/confidential/` -- reserved for any true/exact plot coordinates,
   should they ever be needed; gitignored and blocked at commit time by
   `.git/hooks/pre-commit`. Not expected to be used in this repo.

@@ -1,0 +1,8 @@
+step,exit_code,expected_output_present
+3: gridmetrics.exe batch mode,0,TRUE
+4: single-tool mode (/tool:filterdata),0,TRUE
+5: single-tool mode (/tool:groundfilter),0,TRUE
+6: canonical chain (ground/canopy/treetops),0,TRUE
+7: crown segmentation chain,0,TRUE
+8: terrain-metrics chain,0,TRUE
+9: point-cloud-only chain,0,TRUE
