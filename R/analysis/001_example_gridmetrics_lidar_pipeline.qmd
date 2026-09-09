@@ -64,10 +64,20 @@ dir_tables    = file.path("output", "tables")
 dir.create(dir_derived, recursive = TRUE, showWarnings = FALSE)
 dir.create(dir_tables, recursive = TRUE, showWarnings = FALSE)
 
-# The compiled FUSION2 CLI tools live in the sibling FUSION2 repo's bin/
-# folder -- this example repo calls the already-built executables, it does
-# not build them.
-dir_fusion_bin = "<FUSION2 bin directory>"
+# The compiled FUSION2 CLI tools live in the sibling fusion_update repo's bin/
+# folder -- resolve dynamically via Box/sync or environment variables.
+dir_box_sync = if (nzchar(Sys.getenv("BOX_PATH")) && dir.exists(Sys.getenv("BOX_PATH"))) {
+  normalizePath(Sys.getenv("BOX_PATH"), winslash = "/")
+} else if (nzchar(Sys.getenv("USERPROFILE")) && dir.exists(file.path(Sys.getenv("USERPROFILE"), "Box", "sync"))) {
+  normalizePath(file.path(Sys.getenv("USERPROFILE"), "Box", "sync"), winslash = "/")
+} else {
+  normalizePath(file.path("~", "Box", "sync"), winslash = "/", mustWork = FALSE)
+}
+dir_fusion_bin = file.path(dir_box_sync, "coding", "FUSION", "fusion_update", "bin")
+if (!dir.exists(dir_fusion_bin)) {
+  dir_fusion_bin_rel = normalizePath(file.path("..", "..", "..", "fusion_update", "bin"), winslash = "/", mustWork = FALSE)
+  if (dir.exists(dir_fusion_bin_rel)) dir_fusion_bin = dir_fusion_bin_rel
+}
 path_groundfilter = file.path(dir_fusion_bin, "groundfilter.exe")
 path_canopymodel  = file.path(dir_fusion_bin, "canopymodel.exe")
 path_gridmetrics  = file.path(dir_fusion_bin, "gridmetrics.exe")

@@ -52,8 +52,15 @@ options(scipen = 10E6)
 
 # The true, full-size WA DNR source tables live outside this repo -- this
 # example only ever writes a small subset of them into data/raw/dnr/, which
-# is what steps 3+ actually read.
-dir_dnr_source = "<WA DNR source directory>"
+# is what steps 3+ actually read. Resolve dynamically via Box/sync or environment variables.
+dir_box_sync = if (nzchar(Sys.getenv("BOX_PATH")) && dir.exists(Sys.getenv("BOX_PATH"))) {
+  normalizePath(Sys.getenv("BOX_PATH"), winslash = "/")
+} else if (nzchar(Sys.getenv("USERPROFILE")) && dir.exists(file.path(Sys.getenv("USERPROFILE"), "Box", "sync"))) {
+  normalizePath(file.path(Sys.getenv("USERPROFILE"), "Box", "sync"), winslash = "/")
+} else {
+  normalizePath(file.path("~", "Box", "sync"), winslash = "/", mustWork = FALSE)
+}
+dir_dnr_source = file.path(dir_box_sync, "data", "WA", "DNR")
 dir_dnr_subset = file.path("data", "raw", "dnr")
 dir_tables     = file.path("output", "tables")
 dir.create(dir_dnr_subset, recursive = TRUE, showWarnings = FALSE)
