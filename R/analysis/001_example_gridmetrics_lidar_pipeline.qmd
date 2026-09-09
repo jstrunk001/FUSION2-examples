@@ -228,6 +228,17 @@ fn_run_fusion_tool(
 canopy cover, and point density) over the example tile, again normalized
 using Step 1's ground DEM.
 
+`/nodata:` and `/noheight:` are named explicitly below even though both are
+left at their defaults, so a reader sees them: `/nodata:NA` marks a grid
+cell with zero lidar returns at all (a genuine data gap -- nothing landed
+there), while `/noheight:0` marks a cell that has returns but none clear
+the `/minht` cutoff (a real "no canopy here" answer, not missing data).
+`terra::rast()` already treats a GeoTIFF's registered NoData value
+(including `NaN`, which `/nodata:NA` resolves to) as `NA` on read, and
+`data.table::fread()`'s default `na.strings` already includes `"NA"` for
+the CSV summary table -- both example-script readers below pick up the
+convention automatically, no reader-side code change needed.
+
 ```{r}
 #| label: step-3-gridmetrics
 
@@ -245,6 +256,8 @@ fn_run_fusion_tool(
       , paste0("/ground:", path_ground_dem)
       , "/cellsize:10"
       , paste0("/outdir:", dir_gridmetrics_out)
+      , "/nodata:NA"
+      , "/noheight:0"
       )
   , tool_label = "gridmetrics"
   )
@@ -279,6 +292,13 @@ dt_summary = data.table::rbindlist(list(
   , fn_summarize_raster(path_gridmetrics, "elev_mean")
   , fn_summarize_raster(path_gridmetrics, "canopy_cover")
   , fn_summarize_raster(path_gridmetrics, "point_density")
+  # elev_aad (average absolute deviation) and r1count (first-return count)
+  # are part of gridmetrics' full elevation-statistic bundle and
+  # per-return-number counts -- summarized here to confirm those bands
+  # exist and carry real values, not just the handful of bands already
+  # checked above
+  , fn_summarize_raster(path_gridmetrics, "elev_aad")
+  , fn_summarize_raster(path_gridmetrics, "r1count")
   ))
 print(dt_summary)
 
@@ -326,6 +346,15 @@ shell.exec(normalizePath(path_chm_preview))
 
 `cloudmetrics` computes statistical summaries (elevation percentiles, canopy cover, canopy relief ratio, and standard deviations) for a point cloud file or directory of files, with optional height normalization against a ground DTM raster or directory of DTM tiles.
 
+Like `gridmetrics` in Step 3, `/nodata:` and `/noheight:` are named
+explicitly below at their defaults: `/nodata:NA` would mark the whole
+output row `NA` if the clip had zero points at all, and `/noheight:0` marks
+the height-dependent columns (the `elev_*`/`int_*` statistic bundle) `0`
+if points exist but none clear `/minht:2.0` -- neither condition applies to
+this particular clip (it has plenty of canopy returns), but the columns
+are always present and worth naming for a reader comparing this output
+against a clip that does hit one of those cases.
+
 ```{r}
 #| label: step-5-cloudmetrics
 
@@ -343,11 +372,16 @@ fn_run_fusion_tool(
       , paste0("/ground:", path_ground_dem)
       , paste0("/output:", path_cloudmetrics_out)
       , "/minht:2.0"
+      , "/nodata:NA"
+      , "/noheight:0"
       )
   , tool_label = "cloudmetrics"
   )
 
-#2. read back and display the computed metrics
+#2. read back and display the computed metrics -- cloudmetrics now writes
+#   the same full elevation/intensity statistic bundle gridmetrics does
+#   (AAD, MAD-median/mode, L-moments, quadratic/cubic mean, percentiles,
+#   ...), not just the handful of columns earlier releases wrote
 dt_cloudmetrics = data.table::fread(path_cloudmetrics_out)
 print(dt_cloudmetrics)
 ```
