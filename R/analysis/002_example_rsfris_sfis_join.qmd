@@ -14,9 +14,7 @@ Pipeline script -- builds a small, non-confidential example subset of two
 Washington DNR forest inventory programs (RSFRIS and SFIS) and demonstrates
 a plot-tree join and summary. Not a scientific finding, so this follows the
 pipeline template (execution-ordered "# Step N" headings), not the
-manuscript-style analysis template. See
-r_coding_standards.md
-Section 19.
+manuscript-style analysis template.
 
 This is independent of 001_example_gridmetrics_lidar_pipeline.qmd -- the WA
 DNR plots used here are not known to overlap the example lidar tile, so
@@ -52,15 +50,11 @@ options(scipen = 10E6)
 
 # The true, full-size WA DNR source tables live outside this repo -- this
 # example only ever writes a small subset of them into data/raw/dnr/, which
-# is what steps 3+ actually read. Resolve dynamically via Box/sync or environment variables.
-dir_box_sync = if (nzchar(Sys.getenv("BOX_PATH")) && dir.exists(Sys.getenv("BOX_PATH"))) {
-  normalizePath(Sys.getenv("BOX_PATH"), winslash = "/")
-} else if (nzchar(Sys.getenv("USERPROFILE")) && dir.exists(file.path(Sys.getenv("USERPROFILE"), "Box", "sync"))) {
-  normalizePath(file.path(Sys.getenv("USERPROFILE"), "Box", "sync"), winslash = "/")
-} else {
-  normalizePath(file.path("~", "Box", "sync"), winslash = "/", mustWork = FALSE)
-}
-dir_dnr_source = file.path(dir_box_sync, "data", "WA", "DNR")
+# is what steps 3+ actually read. Regenerating the subset (Step 2 below) is
+# a dev-only path: it only runs when the committed subset is missing, and
+# needs WA_DNR_SOURCE_DIR pointed at wherever those full source tables live
+# locally.
+dir_dnr_source = Sys.getenv("WA_DNR_SOURCE_DIR")
 dir_dnr_subset = file.path("data", "raw", "dnr")
 dir_tables     = file.path("output", "tables")
 dir.create(dir_dnr_subset, recursive = TRUE, showWarnings = FALSE)
@@ -167,6 +161,12 @@ path_sfis_plot_sub      = file.path(dir_dnr_subset, "sfis_plot_data_subset.csv")
 path_sfis_tree_sub      = file.path(dir_dnr_subset, "sfis_tree_data_subset.csv")
 
 nms_subset_paths = c(path_rsfris_metrics_sub, path_rsfris_tree_sub, path_sfis_plot_sub, path_sfis_tree_sub)
+
+if(!all(file.exists(nms_subset_paths)) && !nzchar(dir_dnr_source)) stop(
+    "Committed example subset is missing under ", dir_dnr_subset
+  , " and WA_DNR_SOURCE_DIR is not set, so it can't be regenerated. "
+  , "Point WA_DNR_SOURCE_DIR at the full RSFRIS/SFIS source tables."
+  )
 
 if(!all(file.exists(nms_subset_paths))){
 

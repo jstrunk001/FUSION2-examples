@@ -15,9 +15,7 @@ against real example data through every documented usage pattern:
 gridmetrics.exe's own native batch mode, single-stage /tool: mode, and
 every /pipeline: chain shape in PIPELINE_GUIDE.md. Follows the pipeline
 template (execution-ordered "# Step N" headings), not the manuscript-style
-analysis template, per
-r_coding_standards.md
-Section 19.
+analysis template.
 
 Every command below is built as one literal, resolved command-line string
 and printed exactly as a person would type it at a terminal, rather than
@@ -67,26 +65,27 @@ dir_tables    = file.path("output", "tables")
 dir.create(dir_derived, recursive = TRUE, showWarnings = FALSE)
 dir.create(dir_tables, recursive = TRUE, showWarnings = FALSE)
 
-# The compiled FUSION2 CLI tools live in the sibling fusion_update repo's bin/
-# folder -- resolve dynamically via Box/sync or environment variables.
-dir_box_sync = if (nzchar(Sys.getenv("BOX_PATH")) && dir.exists(Sys.getenv("BOX_PATH"))) {
-  normalizePath(Sys.getenv("BOX_PATH"), winslash = "/")
-} else if (nzchar(Sys.getenv("USERPROFILE")) && dir.exists(file.path(Sys.getenv("USERPROFILE"), "Box", "sync"))) {
-  normalizePath(file.path(Sys.getenv("USERPROFILE"), "Box", "sync"), winslash = "/")
-} else {
-  normalizePath(file.path("~", "Box", "sync"), winslash = "/", mustWork = FALSE)
+# The compiled FUSION2 CLI tools are not bundled with this repo -- build
+# FUSION2 from source (https://github.com/jstrunk001/FUSION2) and either put
+# its bin/ folder on PATH or point the FUSION2_BIN_DIR environment variable
+# at it.
+fn_find_fusion_tool = function(tool_name) {
+  path_on_path = Sys.which(tool_name)
+  if (nzchar(path_on_path)) return(normalizePath(path_on_path, winslash = "/"))
+  dir_env = Sys.getenv("FUSION2_BIN_DIR")
+  if (nzchar(dir_env)) {
+    path_in_env_dir = file.path(dir_env, tool_name)
+    if (file.exists(path_in_env_dir)) return(normalizePath(path_in_env_dir, winslash = "/"))
+  }
+  stop(
+      "Could not find ", tool_name, ". Build FUSION2 from source "
+    , "(https://github.com/jstrunk001/FUSION2) and either add its bin/ "
+    , "folder to PATH or set the FUSION2_BIN_DIR environment variable to it."
+    )
 }
-dir_fusion_bin = file.path(dir_box_sync, "coding", "FUSION", "fusion_update", "bin")
-if (!dir.exists(dir_fusion_bin)) {
-  dir_fusion_bin_rel = normalizePath(file.path("..", "..", "..", "fusion_update", "bin"), winslash = "/", mustWork = FALSE)
-  if (dir.exists(dir_fusion_bin_rel)) dir_fusion_bin = dir_fusion_bin_rel
-}
-path_pipeline    = file.path(dir_fusion_bin, "pipeline.exe")
-path_catalog     = file.path(dir_fusion_bin, "catalog.exe")
-path_gridmetrics = file.path(dir_fusion_bin, "gridmetrics.exe")
-if(!file.exists(path_pipeline)) stop("pipeline.exe not found at ", path_pipeline)
-if(!file.exists(path_catalog)) stop("catalog.exe not found at ", path_catalog)
-if(!file.exists(path_gridmetrics)) stop("gridmetrics.exe not found at ", path_gridmetrics)
+path_pipeline    = fn_find_fusion_tool("pipeline.exe")
+path_catalog     = fn_find_fusion_tool("catalog.exe")
+path_gridmetrics = fn_find_fusion_tool("gridmetrics.exe")
 
 # The same small example point cloud tile used by
 # 001_example_gridmetrics_lidar_pipeline.qmd -- see that script's "Pipeline

@@ -15,8 +15,7 @@ execute:
 ---
 
 <!--
-Analysis template. Conventions this template follows -- see
-r_coding_standards.md for the full rules:
+Analysis template. Conventions this template follows:
   - every chunk is preceded by a "##" heading + one-sentence description
   - work inside a chunk is broken into a numbered "#N. <step>" sequence,
     one comment per discrete step (not per line) -- Section 6
