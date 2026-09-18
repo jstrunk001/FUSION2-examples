@@ -41,11 +41,14 @@ knitr::opts_knit$set(root.dir = "../..")
 
 # data.table for the small metrics summary table; terra for reading back
 # and previewing the GeoTIFF rasters the FUSION2 tools write; RForInvt for
-# output versioning; ggplot2 for the one preview figure.
+# output versioning; ggplot2 for the one preview figure; DBI/RSQLite for
+# reading gridmetrics' SQLite table-output option (Step 4) back into R.
 library(data.table)
 library(terra)
 library(RForInvt)
 library(ggplot2)
+library(DBI)
+library(RSQLite)
 
 knitr::opts_chunk$set(
     echo      = TRUE
@@ -137,9 +140,13 @@ fn_summarize_raster = function(path_raster, layer_name){
 # Pipeline overview
 
 This pipeline demonstrates a standard ground-classification-to-metrics
-lidar workflow using three FUSION2 command-line tools -- `groundfilter`,
-`canopymodel`, and `gridmetrics` -- against one small, real example point
-cloud tile.
+lidar workflow using four FUSION2 command-line tools -- `groundfilter`,
+`canopymodel`, `gridmetrics`, and `cloudmetrics` -- against one small, real
+example point cloud tile. The `gridmetrics` and `cloudmetrics` steps also
+exercise the current full metric bundle: height/intensity strata
+(`/strata`/`/intstrata`), surface roughness (`/surfstats`), and
+`gridmetrics`' opt-in per-cell table export (`/output-table`) in both of
+its supported formats, CSV and SQLite.
 
 **Example tile source.** The input tile is a small clip of a public USGS
 3DEP lidar point cloud, project `WA_6County_A24`, tile
@@ -169,9 +176,14 @@ Steps:
 1. Classify ground points and build a ground surface DEM (`groundfilter`).
 2. Build a canopy height model from the point cloud and ground DEM
    (`canopymodel`).
-3. Compute a grid of lidar elevation and canopy metrics (`gridmetrics`).
-4. Summarize the three derived rasters into one small metrics table and
-   preview the canopy height model.
+3. Compute a grid of the full lidar elevation/intensity metric bundle,
+   height/intensity strata, and surface roughness (`gridmetrics`),
+   exporting a per-cell CSV table alongside the raster.
+4. Re-run `gridmetrics` as a table-only export (`/noraster` +
+   `/output-table:<path.sqlite>`), demonstrating the SQLite table format.
+5. Summarize the derived rasters and tables into one small metrics table
+   and preview the canopy height model.
+6. Compute per-plot summary and height-strata metrics with `cloudmetrics`.
 
 # Step 1: Classify ground points and build a ground surface DEM
 
@@ -233,22 +245,44 @@ fn_run_fusion_tool(
   )
 ```
 
-# Step 3: Compute a grid of lidar elevation and canopy metrics
+# Step 3: Compute a grid of the full metric bundle, strata, and surface roughness
 
-`gridmetrics` computes a multi-band raster of standard lidar metrics
-(mean and standard deviation of elevation, the 95th height percentile,
-canopy cover, and point density) over the example tile, again normalized
-using Step 1's ground DEM.
+`gridmetrics` computes a per-cell raster of the full lidar elevation/
+intensity statistic bundle over the example tile -- min/max/mean/stddev/
+variance/skewness/kurtosis, the full percentile curve, L-moments, and more
+(see `METRICS_REFERENCE.md` Section 1 for the complete column list), again
+normalized using Step 1's ground DEM. Three further capabilities are
+requested alongside that base bundle:
+
+- `/strata:0.5,2.0,5.0,10.0,20.0` buckets each cell's points into six
+  height strata (the five thresholds given, plus one "above the last
+  threshold" bucket) and reports a count/proportion/mean/stddev/min/max
+  summary per bucket, both as CSV columns and, with `/strataraster`, as
+  raster bands (`stratum_00_mean`, `density_stratum_00`, ...).
+  `/intstrata` (omitted here, so it defaults to `/strata`'s thresholds)
+  would report the same buckets' **intensity** values instead of
+  elevation.
+- `/surfstats` adds `surface_area_ratio` and `roughness` bands, derived
+  directly from the per-cell elevation grid `gridmetrics` already holds in
+  memory -- no second raster read. `/surfstats-source:max` (the default,
+  named explicitly here) feeds it each cell's `elev_max`, appropriate
+  since this grid holds ground-normalized canopy heights, not raw ground
+  elevations.
+- `/output-table:<path.csv>` writes that same full per-cell table as a CSV
+  file alongside the raster -- opt-in, so nothing is written unless the
+  option is given. Step 4 below re-runs `gridmetrics` with `/noraster` and
+  a `.sqlite` path instead, to demonstrate the table-only, SQLite side of
+  the same option.
 
 `/nodata:` and `/noheight:` are named explicitly below even though both are
 left at their defaults, so a reader sees them: `/nodata:NA` marks a grid
 cell with zero lidar returns at all (a genuine data gap -- nothing landed
-there), while `/noheight:0` marks a cell that has returns but none clear
-the `/minht` cutoff (a real "no canopy here" answer, not missing data).
-`terra::rast()` already treats a GeoTIFF's registered NoData value
-(including `NaN`, which `/nodata:NA` resolves to) as `NA` on read, and
-`data.table::fread()`'s default `na.strings` already includes `"NA"` for
-the CSV summary table -- both example-script readers below pick up the
+there), while `/noheight:0` marks a cell (or stratum bucket) that has
+returns but none clear the `/minht` cutoff (a real "no canopy here" answer,
+not missing data). `terra::rast()` already treats a GeoTIFF's registered
+NoData value (including `NaN`, which `/nodata:NA` resolves to) as `NA` on
+read, and `data.table::fread()`'s default `na.strings` already includes
+`"NA"` for the CSV table -- both example-script readers below pick up the
 convention automatically, no reader-side code change needed.
 
 ```{r}
@@ -260,7 +294,17 @@ convention automatically, no reader-side code change needed.
 dir_gridmetrics_out = file.path(dir_derived, "gridmetrics")
 dir.create(dir_gridmetrics_out, recursive = TRUE, showWarnings = FALSE)
 
-#2. run gridmetrics against the example tile
+#2. mint a versioned path for the per-cell CSV table /output-table writes
+#   alongside the raster
+path_gridmetrics_table = RForInvt::file_version(
+    file.path(dir_tables, "gridmetrics_table.csv")
+  , increment = TRUE
+  , note = "gridmetrics per-cell CSV table (full metric bundle plus strata) from the example lidar clip"
+  )
+
+#3. run gridmetrics against the example tile, requesting the full metric
+#   bundle's height strata, per-stratum raster bands, surface roughness,
+#   and a per-cell CSV table alongside the raster
 fn_run_fusion_tool(
     path_gridmetrics
   , args = c(
@@ -270,47 +314,124 @@ fn_run_fusion_tool(
       , paste0("/outdir:", dir_gridmetrics_out)
       , "/nodata:NA"
       , "/noheight:0"
+      , "/strata:0.5,2.0,5.0,10.0,20.0"
+      , "/strataraster"
+      , "/surfstats"
+      , "/surfstats-source:max"
+      , paste0("/output-table:", path_gridmetrics_table)
       )
   , tool_label = "gridmetrics"
   )
 
-#3. mint a versioned copy of the resulting raster at a stable name
+#4. mint a versioned copy of the resulting raster at a stable name
 path_gridmetrics_raw = list.files(
     dir_gridmetrics_out
   , pattern = "_gridmetrics\\.tif$"
   , full.names = TRUE
   )[1]
-path_gridmetrics = RForInvt::file_version(
+path_gridmetrics_raster = RForInvt::file_version(
     file.path(dir_derived, "gridmetrics.tif")
   , increment = TRUE
-  , note = "gridmetrics raster from example 200x200 ft lidar clip"
+  , note = "gridmetrics raster (full metric bundle, strata, surface stats) from example 200x200 ft lidar clip"
   )
-file.copy(path_gridmetrics_raw, path_gridmetrics, overwrite = TRUE)
+file.copy(path_gridmetrics_raw, path_gridmetrics_raster, overwrite = TRUE)
 ```
 
-# Step 4: Summarize the derived rasters and preview the canopy height model
+# Step 4: Re-run `gridmetrics` as a table-only export (SQLite, no raster)
 
-This step confirms the three rasters carry real, non-empty values (not
-just placeholder output), then saves a small summary table and a quick
-preview figure of the canopy height model.
+`/noraster` skips the GeoTIFF entirely -- FUSION2 requires `/output-table`
+alongside it, since a run must produce at least one output. This re-run of
+Step 3 writes the identical full metric bundle and strata summary as a
+`.sqlite` database instead of a raster, demonstrating the second of the
+two table formats `/output-table` accepts (`TableWriter` detects the format
+from the path's extension -- `.csv`, or `.sqlite`/`.db`/`.sqlite3`).
 
 ```{r}
-#| label: step-4-summarize
+#| label: step-4-gridmetrics-table-only
+
+#1. mint a versioned path for the SQLite table
+path_gridmetrics_sqlite = RForInvt::file_version(
+    file.path(dir_tables, "gridmetrics_table.sqlite")
+  , increment = TRUE
+  , note = "gridmetrics per-cell SQLite table (table-only run, no raster) from the example lidar clip"
+  )
+
+#2. run gridmetrics again with /noraster + /output-table:<path.sqlite> --
+#   same inputs and strata options as Step 3, just no GeoTIFF this time
+dir_gridmetrics_table_only_out = file.path(dir_derived, "gridmetrics_table_only")
+dir.create(dir_gridmetrics_table_only_out, recursive = TRUE, showWarnings = FALSE)
+
+fn_run_fusion_tool(
+    path_gridmetrics
+  , args = c(
+        path_las_example
+      , paste0("/ground:", path_ground_dem)
+      , "/cellsize:10"
+      , paste0("/outdir:", dir_gridmetrics_table_only_out)
+      , "/strata:0.5,2.0,5.0,10.0,20.0"
+      , "/noraster"
+      , paste0("/output-table:", path_gridmetrics_sqlite)
+      )
+  , tool_label = "gridmetrics (table-only, SQLite)"
+  )
+
+#3. confirm no raster was written alongside the table -- /noraster's whole
+#   point is to skip it
+cat(
+    "GeoTIFF written in table-only outdir? "
+  , length(list.files(dir_gridmetrics_table_only_out, pattern = "\\.tif$")) > 0
+  , "\n"
+  )
+
+#4. read back the SQLite table via DBI/RSQLite and preview a few columns,
+#   including a stratum bucket, to confirm the second table format carries
+#   the same content the CSV table (Step 3) and raster bands do
+con_gridmetrics_sqlite = DBI::dbConnect(RSQLite::SQLite(), path_gridmetrics_sqlite)
+dt_gridmetrics_sqlite = data.table::setDT(DBI::dbReadTable(con_gridmetrics_sqlite, "grid"))
+DBI::dbDisconnect(con_gridmetrics_sqlite)
+print(dt_gridmetrics_sqlite[ , .(Col, Row, elev_mean, CanopyCover, stratum_02_mean, stratum_02_count)])
+```
+
+# Step 5: Summarize the derived rasters and tables, and preview the canopy height model
+
+This step confirms the derived rasters carry real, non-empty values (not
+just placeholder output) -- including the new strata bands from Step 3 --
+cross-checks Step 3's CSV table against the raster, then saves a small
+summary table and a quick preview figure of the canopy height model.
+
+**`surface_area_ratio`/`roughness` are `/nodata` for every cell in this
+particular example clip**, confirmed by the `n_na == n_cells` rows in the
+summary table below -- both are computed only from cells with at least one
+point above `/minht` (see Step 3), and this clip's canopy cover is sparse
+(`canopy_cover` mean 2.7%, per the `dt_summary` row below), so no cell in
+this small 20x20 grid has a full 3x3 neighborhood of canopy-bearing cells.
+The bands are real and populated on denser canopy, just not demonstrable
+on this particular small, sparse-canopy example tile.
+
+```{r}
+#| label: step-5-summarize
 
 #1. summarize each raster's cell values into one small comparison table
 dt_summary = data.table::rbindlist(list(
     fn_summarize_raster(path_ground_dem, "ground_elevation")
   , fn_summarize_raster(path_chm, "canopy_height")
-  , fn_summarize_raster(path_gridmetrics, "elev_mean")
-  , fn_summarize_raster(path_gridmetrics, "canopy_cover")
-  , fn_summarize_raster(path_gridmetrics, "point_density")
+  , fn_summarize_raster(path_gridmetrics_raster, "elev_mean")
+  , fn_summarize_raster(path_gridmetrics_raster, "canopy_cover")
+  , fn_summarize_raster(path_gridmetrics_raster, "point_density")
   # elev_aad (average absolute deviation) and r1count (first-return count)
   # are part of gridmetrics' full elevation-statistic bundle and
   # per-return-number counts -- summarized here to confirm those bands
   # exist and carry real values, not just the handful of bands already
   # checked above
-  , fn_summarize_raster(path_gridmetrics, "elev_aad")
-  , fn_summarize_raster(path_gridmetrics, "r1count")
+  , fn_summarize_raster(path_gridmetrics_raster, "elev_aad")
+  , fn_summarize_raster(path_gridmetrics_raster, "r1count")
+  # /strataraster and /surfstats bands from Step 3 -- confirms the
+  # height-strata buckets and surface-roughness metrics landed in the
+  # raster, not just in Step 3's CSV table
+  , fn_summarize_raster(path_gridmetrics_raster, "stratum_02_mean")
+  , fn_summarize_raster(path_gridmetrics_raster, "density_stratum_02")
+  , fn_summarize_raster(path_gridmetrics_raster, "surface_area_ratio")
+  , fn_summarize_raster(path_gridmetrics_raster, "roughness")
   ))
 print(dt_summary)
 
@@ -322,7 +443,14 @@ path_summary_table = RForInvt::file_version(
   )
 data.table::fwrite(dt_summary, path_summary_table)
 
-#3. build a quick preview plot of the canopy height model
+#3. spot-check Step 3's CSV table against the raster bands summarized
+#   above -- the same stratum_02_mean values should show up as both a
+#   raster band and a CSV column, since /strata, /strataraster, and
+#   /output-table all draw from the same per-cell computation
+dt_gridmetrics_table = data.table::fread(path_gridmetrics_table)
+print(dt_gridmetrics_table[ , .(Col, Row, elev_mean, CanopyCover, stratum_02_mean, stratum_02_count)])
+
+#4. build a quick preview plot of the canopy height model
 #  - the current FUSION2 build does not attach a coordinate reference or
 #    real-world extent to its GeoTIFF output (cell indices only), so this
 #    preview uses relative grid coordinates rather than the tile's true
@@ -343,7 +471,7 @@ p_chm = ggplot2::ggplot(df_chm, ggplot2::aes(x = x, y = y, fill = canopy_height_
     ) +
   ggplot2::theme_minimal(base_size = 12)
 
-#4. save the preview figure through the standard versioned-figure path and
+#5. save the preview figure through the standard versioned-figure path and
 #   display it immediately
 path_chm_preview = RForInvt::file_version(
     file.path(dir_derived, "chm_preview.tif")
@@ -354,27 +482,35 @@ ggplot2::ggsave(path_chm_preview, p_chm, device = "tiff", width = 6, height = 5)
 shell.exec(normalizePath(path_chm_preview))
 ```
 
-# Step 5: Compute summary plot and clip metrics with `cloudmetrics`
+# Step 6: Compute per-plot summary and height-strata metrics with `cloudmetrics`
 
 `cloudmetrics` computes statistical summaries (elevation percentiles, canopy cover, canopy relief ratio, and standard deviations) for a point cloud file or directory of files, with optional height normalization against a ground DTM raster or directory of DTM tiles.
 
 Like `gridmetrics` in Step 3, `/nodata:` and `/noheight:` are named
 explicitly below at their defaults: `/nodata:NA` would mark the whole
 output row `NA` if the clip had zero points at all, and `/noheight:0` marks
-the height-dependent columns (the `elev_*`/`int_*` statistic bundle) `0`
-if points exist but none clear `/minht:2.0` -- neither condition applies to
-this particular clip (it has plenty of canopy returns), but the columns
-are always present and worth naming for a reader comparing this output
-against a clip that does hit one of those cases.
+the height-dependent columns (the `elev_*`/`int_*` statistic bundle, and
+each stratum bucket's mean/stddev/min/max) `0` if points exist but none
+clear `/minht:2.0` (or don't land in that bucket) -- neither condition
+applies to this particular clip (it has plenty of canopy returns), but the
+columns are always present and worth naming for a reader comparing this
+output against a clip that does hit one of those cases. `/strata` below
+uses gridmetrics' Step 3 thresholds, bucketing this clip's points into the
+same six height strata and reporting `cloudmetrics`' own per-bucket
+count/proportion/mean/stddev/min/max summary as CSV columns -- there is no
+raster to append bands to here, since `cloudmetrics` produces one summary
+row (or one row per `/shape` polygon feature), not a grid.
 
 ```{r}
-#| label: step-5-cloudmetrics
+#| label: step-6-cloudmetrics
 
-#1. run cloudmetrics on the example LAS file with ground DTM height normalization
+#1. run cloudmetrics on the example LAS file with ground DTM height
+#   normalization and the same height strata thresholds gridmetrics used
+#   in Step 3
 path_cloudmetrics_out = RForInvt::file_version(
     file.path(dir_tables, "cloudmetrics_normalized.csv")
   , increment = TRUE
-  , note = "cloudmetrics summary metrics with ground DTM normalization"
+  , note = "cloudmetrics summary metrics with ground DTM normalization and height strata"
   )
 
 fn_run_fusion_tool(
@@ -386,6 +522,7 @@ fn_run_fusion_tool(
       , "/minht:2.0"
       , "/nodata:NA"
       , "/noheight:0"
+      , "/strata:0.5,2.0,5.0,10.0,20.0"
       )
   , tool_label = "cloudmetrics"
   )
@@ -396,6 +533,12 @@ fn_run_fusion_tool(
 #   ...), not just the handful of columns earlier releases wrote
 dt_cloudmetrics = data.table::fread(path_cloudmetrics_out)
 print(dt_cloudmetrics)
+
+#3. spot-check the height-strata columns specifically -- same bucket
+#   layout and naming convention as gridmetrics' /strata columns (Step 3),
+#   just one summary row instead of one row per grid cell
+nms_strata_cols = grep("^stratum_", names(dt_cloudmetrics), value = TRUE)
+print(dt_cloudmetrics[ , ..nms_strata_cols])
 ```
 
 # Session Info

@@ -246,30 +246,68 @@ arg_tilesize = "/tilesize:300,300"
 If a workflow only ever needs `gridmetrics`, `pipeline.exe` isn't
 required at all: pointing `gridmetrics.exe` directly at a directory
 tiles, buffers, and mosaics the whole project in one built-in batch mode.
+Batch/tiled mode's per-tile raster now carries the identical full
+elevation/intensity metric bundle single-file mode does -- with real band
+names/descriptions this time, confirmed by direct inspection (see
+`001_example_gridmetrics_lidar_pipeline.qmd` Step 3 for the same bundle in
+single-file mode) -- and batch mode can export its own
+per-tile-then-merged `/output-table` CSV or SQLite table, independent of
+`pipeline.exe`'s own separate table-concatenation step. `/strata`'s
+per-cell height-strata columns are included in that merged table;
+`/strataraster`'s extra per-stratum *raster* bands are not (confirmed by
+direct inspection) -- a real, current gap between single-file and
+batch/tiled mode, so `/strataraster` is not requested below.
 
 ```{r}
 #| label: step-3-gridmetrics-batch
 
 dir_gridmetrics_batch_out = file.path(dir_derived, "gridmetrics_batch_out")
 dir.create(dir_gridmetrics_batch_out, recursive = TRUE, showWarnings = FALSE)
+path_gridmetrics_batch_table = file.path(dir_gridmetrics_batch_out, "gridmetrics_batch_table.csv")
 
 cmd_gridmetrics_batch = sprintf(
-    '"%s" "%s" /outdir:"%s" %s %s /buffer:25 /cellsize:10'
+    '"%s" "%s" /outdir:"%s" %s %s /buffer:25 /cellsize:10 /strata:0.5,2.0,5.0,10.0,20.0 /output-table:"%s"'
   , path_gridmetrics, dir_las_input, dir_gridmetrics_batch_out
-  , arg_extent, arg_tilesize
+  , arg_extent, arg_tilesize, path_gridmetrics_batch_table
   )
 result_gridmetrics_batch = fn_run_cmd(
     cmd_gridmetrics_batch
-  , "Step 3: gridmetrics.exe batch mode (no pipeline.exe)"
+  , "Step 3: gridmetrics.exe batch mode (no pipeline.exe) -- full metric bundle, strata, and a merged CSV table"
   )
 
+#1. read the real elev_mean band directly from a per-tile GeoTIFF, not the
+#   mosaicked .vrt below -- GDAL's VRT mosaicking does not carry per-band
+#   descriptions through, so a band name lookup against the .vrt would
+#   silently fall back to whichever band happens to be first
+path_gridmetrics_batch_tile = list.files(
+    dir_gridmetrics_batch_out, pattern = "^tile_.*\\.tif$", full.names = TRUE
+  )[1]
+if(!is.na(path_gridmetrics_batch_tile)){
+  print(fn_summarize_raster(path_gridmetrics_batch_tile, "elev_mean"))
+} else {
+  cat("Step 3 did not produce a per-tile raster -- see console output above.\n")
+  }
+
+#2. confirm the tiles were still mosaicked into a project-wide .vrt
 path_gridmetrics_batch_vrt = list.files(
     dir_gridmetrics_batch_out, pattern = "\\.vrt$", full.names = TRUE
   )[1]
-if(!is.na(path_gridmetrics_batch_vrt)){
-  print(fn_summarize_raster(path_gridmetrics_batch_vrt, "elev_mean"))
-} else {
+if(is.na(path_gridmetrics_batch_vrt)){
   cat("Step 3 did not produce a mosaicked .vrt -- see console output above.\n")
+  }
+
+#3. the merged /output-table CSV carries the real per-cell strata columns
+#   that don't (yet) exist as raster bands in batch/tiled mode
+if(file.exists(path_gridmetrics_batch_table)){
+  dt_gridmetrics_batch_table = data.table::fread(path_gridmetrics_batch_table)
+  nms_strata_cols = grep("^stratum_", names(dt_gridmetrics_batch_table), value = TRUE)
+  cat(
+      "Batch-mode merged /output-table CSV -- rows:", nrow(dt_gridmetrics_batch_table)
+    , " columns:", ncol(dt_gridmetrics_batch_table)
+    , " height-strata columns:", length(nms_strata_cols), "\n"
+    )
+} else {
+  cat("Step 3 did not produce a merged /output-table CSV -- see console output above.\n")
   }
 ```
 
