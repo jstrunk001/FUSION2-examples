@@ -1,0 +1,2 @@
+"file","version","base_name","version_suffix","exist","id","date","npad","pad","markerVS","markerDT","sep","note"
+"output/tables/cloudmetrics_normalized.csv","output/tables/cloudmetrics_normalized.csv/cloudmetrics_normalized_VS001_20260921114108.csv","cloudmetrics_normalized.csv","/_VS001_20260921114108",FALSE,1,"20260921114108",3,"0","VS","","_","cloudmetrics summary metrics with ground DTM normalization and height strata"

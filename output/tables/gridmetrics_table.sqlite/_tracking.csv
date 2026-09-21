@@ -1,0 +1,3 @@
+"file","version","base_name","version_suffix","exist","id","date","npad","pad","markerVS","markerDT","sep","note"
+"output/tables/gridmetrics_table.sqlite","output/tables/gridmetrics_table.sqlite/gridmetrics_table_VS002_20260921114102.sqlite","gridmetrics_table.sqlite","/_VS002_20260921114102",FALSE,2,"20260921114102",3,"0","VS","","_","gridmetrics per-cell SQLite table (table-only run, no raster) from the example lidar clip"
+"output/tables/gridmetrics_table.sqlite","output/tables/gridmetrics_table.sqlite/gridmetrics_table_VS001_20260921113950.sqlite","gridmetrics_table.sqlite","/_VS001_20260921113950",TRUE,1,"20260921113950",3,"0","VS",NA,"_","gridmetrics per-cell SQLite table (table-only run, no raster) from the example lidar clip"

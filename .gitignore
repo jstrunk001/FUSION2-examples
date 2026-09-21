@@ -68,6 +68,14 @@ publications/*
 # (git_practices.md Section 7). Ignore individual large/regenerable files
 # here on a per-project basis instead of blanket-ignoring the folder.
 
+# Exception: gridmetrics_table.sqlite/ is RForInvt::file_version()'s
+# versioned-directory output for the /output-table SQLite demo in
+# R/analysis/001_example_gridmetrics_lidar_pipeline.qmd -- the blanket
+# *.sqlite rule above matches it by directory name too, not just the
+# database file inside it.
+!output/tables/gridmetrics_table.sqlite/
+!output/tables/gridmetrics_table.sqlite/**
+
 # R/RStudio artifacts
 .Rproj.user/
 .Rhistory
