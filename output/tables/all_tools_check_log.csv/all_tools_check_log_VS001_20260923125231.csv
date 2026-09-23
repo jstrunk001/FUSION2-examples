@@ -1,0 +1,153 @@
+step,tool,check,severity,passed,observed,expected,result,build_modified
+1,reference,reference heights stay within a plausible range,hard,TRUE,"-0.72,  4.26",-10 to 300 ft,pass,
+2,catalog,catalog: exits with status 0,hard,TRUE,0,0,pass,2026-09-09 12:43
+2,catalog,CSV report written,hard,TRUE,catalog.csv,catalog.csv,pass,2026-09-09 12:43
+2,catalog,point count matches the tile,hard,TRUE,51737,51737,pass,2026-09-09 12:43
+2,catalog,XY bounds match the tile within 0.01 ft,hard,FALSE,"2050780, 2050980,  410525,  410725","2050775, 2050975,  410525,  410725",fail,2026-09-09 12:43
+2,catalog,Z range matches the tile within 0.01 ft,hard,TRUE,"773.13, 814.86","773.13, 814.86",pass,2026-09-09 12:43
+2,catalog,/density raster written,hard,FALSE,0,>= 1 .tif,fail,2026-09-09 12:43
+3,filterdata,filterdata first_returns: exits with status 0,hard,TRUE,0,0,pass,2026-09-09 12:43
+3,filterdata,first_returns: output readable,hard,TRUE,ok,ok,pass,2026-09-09 12:43
+3,filterdata,first_returns: kept count matches R,hard,TRUE,51646,51646,pass,2026-09-09 12:43
+3,filterdata,first_returns: every kept point satisfies the filter,hard,TRUE,0,0 violations,pass,2026-09-09 12:43
+3,filterdata,first_returns: coordinate system kept,soft,FALSE,none,present,warn,2026-09-09 12:43
+3,filterdata,first_returns: withheld points dropped,soft,FALSE,14327,0,warn,2026-09-09 12:43
+3,filterdata,filterdata ground_class: exits with status 0,hard,TRUE,0,0,pass,2026-09-09 12:43
+3,filterdata,ground_class: output readable,hard,TRUE,ok,ok,pass,2026-09-09 12:43
+3,filterdata,ground_class: kept count matches R,hard,TRUE,25429,25429,pass,2026-09-09 12:43
+3,filterdata,ground_class: every kept point satisfies the filter,hard,TRUE,0,0 violations,pass,2026-09-09 12:43
+3,filterdata,ground_class: coordinate system kept,soft,FALSE,none,present,warn,2026-09-09 12:43
+3,filterdata,ground_class: withheld points dropped,soft,TRUE,0,0,pass,2026-09-09 12:43
+3,filterdata,filterdata z_780_800: exits with status 0,hard,TRUE,0,0,pass,2026-09-09 12:43
+3,filterdata,z_780_800: output readable,hard,TRUE,ok,ok,pass,2026-09-09 12:43
+3,filterdata,z_780_800: kept count matches R,hard,TRUE,29187,29187,pass,2026-09-09 12:43
+3,filterdata,z_780_800: every kept point satisfies the filter,hard,TRUE,0,0 violations,pass,2026-09-09 12:43
+3,filterdata,z_780_800: coordinate system kept,soft,FALSE,none,present,warn,2026-09-09 12:43
+3,filterdata,z_780_800: withheld points dropped,soft,FALSE,8902,0,warn,2026-09-09 12:43
+4,thindata,thindata: exits with status 0,hard,TRUE,0,0,pass,2026-09-09 12:43
+4,thindata,output readable,hard,TRUE,ok,ok,pass,2026-09-09 12:43
+4,thindata,no cell keeps more than one point,hard,FALSE,2369,0 duplicate cells,fail,2026-09-09 12:43
+4,thindata,kept count equals occupied cells,hard,FALSE,10186,10003,fail,2026-09-09 12:43
+4,thindata,every kept point exists in the tile,hard,TRUE,0,0 new points,pass,2026-09-09 12:43
+5,groundfilter,groundfilter: exits with status 0,hard,TRUE,0,0,pass,2026-09-09 12:43
+5,groundfilter,ground DEM written,hard,TRUE,ground_dem.tif,ground_dem.tif,pass,2026-09-09 12:43
+5,groundfilter,ground DEM: raster sits on the tile's real coordinates,hard,TRUE,"2050775, 2050975,  410525,  410725","2050775, 2050975,  410525,  410725",pass,2026-09-09 12:43
+5,groundfilter,ground DEM: coordinate system attached,soft,FALSE,none,present,warn,2026-09-09 12:43
+5,groundfilter,ground DEM has no empty cells,hard,TRUE,0,0,pass,2026-09-09 12:43
+5,groundfilter,ground DEM stays within the ground points' elevation range (+/- 1 ft),hard,TRUE,"773.13, 812.20","773.26, 812.56",pass,2026-09-09 12:43
+5,groundfilter,median |FUSION2 - lidR| ground difference under 1 ft,hard,TRUE,0.52,< 1 ft,pass,2026-09-09 12:43
+5,groundfilter,95th percentile |FUSION2 - lidR| ground difference under 3 ft,hard,TRUE,0.91,< 3 ft,pass,2026-09-09 12:43
+5,groundfilter,/output-points LAS written,hard,FALSE,missing,present,fail,2026-09-09 12:43
+6,clipdata,clipdata box: exits with status 0,hard,TRUE,0,0,pass,2026-09-09 12:43
+6,clipdata,box: output readable,hard,TRUE,ok,ok,pass,2026-09-09 12:43
+6,clipdata,box: kept count matches R,hard,TRUE,13445,13445,pass,2026-09-09 12:43
+6,clipdata,clipdata box + height: exits with status 0,hard,TRUE,0,0,pass,2026-09-09 12:43
+6,clipdata,box + height: output readable,hard,TRUE,ok,ok,pass,2026-09-09 12:43
+6,clipdata,box + height: kept count within 10% of R,hard,TRUE,21,21,pass,2026-09-09 12:43
+6,clipdata,box + height: every kept point is 2-200 ft above ground (+/- 0.5 ft),hard,TRUE,"2.55, 4.98",1.5 to 200.5 ft,pass,2026-09-09 12:43
+6,clipdata,clipdata /multifile: exits with status 0,hard,TRUE,0,0,pass,2026-09-09 12:43
+6,clipdata,/multifile: plotA file named from /field,hard,TRUE,1,1,pass,2026-09-09 12:43
+6,clipdata,/multifile: plotA count within 0.5% of R,hard,TRUE,3840,3840,pass,2026-09-09 12:43
+6,clipdata,/multifile: plotB file named from /field,hard,TRUE,1,1,pass,2026-09-09 12:43
+6,clipdata,/multifile: plotB count within 0.5% of R,hard,TRUE,3536,3536,pass,2026-09-09 12:43
+6,clipdata,clipdata /outside: exits with status 0,hard,TRUE,0,0,pass,2026-09-09 12:43
+6,clipdata,/outside: output readable,hard,TRUE,ok,ok,pass,2026-09-09 12:43
+6,clipdata,/outside: count equals tile minus in-plot points (within 0.5%),hard,TRUE,44361,44361,pass,2026-09-09 12:43
+7,canopymodel,canopymodel: exits with status 0,hard,TRUE,0,0,pass,2026-09-09 12:43
+7,canopymodel,canopymodel /smooth:3: exits with status 0,hard,TRUE,0,0,pass,2026-09-09 12:43
+7,canopymodel,canopymodel /slope: exits with status 0,hard,TRUE,0,0,pass,2026-09-09 12:43
+7,canopymodel,canopy height model written,hard,TRUE,chm.tif,chm.tif,pass,2026-09-09 12:43
+7,canopymodel,CHM: raster sits on the tile's real coordinates,hard,TRUE,"2050775, 2050976,  410524,  410725","2050775, 2050975,  410525,  410725",pass,2026-09-09 12:43
+7,canopymodel,CHM: coordinate system attached,soft,FALSE,none,present,warn,2026-09-09 12:43
+7,canopymodel,no CHM cell exceeds the tallest point above ground,hard,FALSE,252 cells; max 809.55,0 cells above 9.26 ft,fail,2026-09-09 12:43
+7,canopymodel,no CHM cell more than 1 ft below ground,hard,TRUE,0.19,>= -1 ft,pass,2026-09-09 12:43
+7,canopymodel,median |CHM - R reference| under 0.5 ft (plausible cells),hard,TRUE,0,< 0.5 ft,pass,2026-09-09 12:43
+7,canopymodel,/smooth:3 CHM written,hard,TRUE,chm_smooth3.tif,chm_smooth3.tif,pass,2026-09-09 12:43
+7,canopymodel,/smooth:3 lowers cell-to-cell variance,hard,TRUE,24189.79,< 32988.38,pass,2026-09-09 12:43
+7,canopymodel,/slope CHM written,hard,TRUE,chm_slope.tif,chm_slope.tif,pass,2026-09-09 12:43
+7,canopymodel,/slope changes at least one cell,hard,TRUE,0.257,> 0,pass,2026-09-09 12:43
+8,returndensity,returndensity: exits with status 0,hard,TRUE,0,0,pass,2026-09-09 12:44
+8,returndensity,density raster written,hard,TRUE,returndensity.tif,returndensity.tif,pass,2026-09-09 12:44
+8,returndensity,density raster: raster sits on the tile's real coordinates,hard,TRUE,"2050775, 2050975,  410525,  410725","2050775, 2050975,  410525,  410725",pass,2026-09-09 12:44
+8,returndensity,density raster: coordinate system attached,soft,FALSE,none,present,warn,2026-09-09 12:44
+8,returndensity,density x cell area sums to the point count (within 0.5%),hard,TRUE,51733,51737,pass,2026-09-09 12:44
+8,returndensity,per-cell counts match R exactly,hard,FALSE,4,0 mismatched cells,fail,2026-09-09 12:44
+8,returndensity,first-return percent within 0-100,hard,TRUE," 93.23, 100.00",0 to 100,pass,2026-09-09 12:44
+8,returndensity,density band's unit label matches the tile's linear units (feet),soft,FALSE,point_density_pts_m2,no m2 label on a feet-based tile,warn,2026-09-09 12:44
+9,densitymetrics,densitymetrics: exits with status 0,hard,TRUE,0,0,pass,2026-09-09 12:44
+9,densitymetrics,stratum raster written,hard,TRUE,dm_densitymetrics.tif,dm_densitymetrics.tif,pass,2026-09-09 12:44
+9,densitymetrics,stratum raster: raster sits on the tile's real coordinates,hard,FALSE,"   0,  200, -200,    0","2050775, 2050975,  410525,  410725",fail,2026-09-09 12:44
+9,densitymetrics,stratum raster: coordinate system attached,soft,FALSE,none,present,warn,2026-09-09 12:44
+9,densitymetrics,"per cell, stratum counts add to total returns",hard,TRUE,0,0 mismatched cells,pass,2026-09-09 12:44
+9,densitymetrics,total returns across cells equals the point count,hard,FALSE,51733,51737,fail,2026-09-09 12:44
+9,densitymetrics,top stratum (> 20 ft) count matches R (within 5 points),hard,FALSE,1347,0,fail,2026-09-09 12:44
+10,gridmetrics,gridmetrics: exits with status 0,hard,TRUE,0,0,pass,2026-09-09 12:43
+10,gridmetrics,/output-table path honored,soft,FALSE,ignored,written,warn,2026-09-09 12:43
+10,gridmetrics,metrics raster written,hard,TRUE,USGS_LPC_WA_6County_A24_w2049750n409500_clip200ft_las12_gridmetrics.tif,USGS_LPC_WA_6County_A24_w2049750n409500_clip200ft_las12_gridmetrics.tif,pass,2026-09-09 12:43
+10,gridmetrics,metrics raster: raster sits on the tile's real coordinates,hard,FALSE,"   0,  200, -200,    0","2050775, 2050975,  410525,  410725",fail,2026-09-09 12:43
+10,gridmetrics,metrics raster: coordinate system attached,soft,FALSE,none,present,warn,2026-09-09 12:43
+10,gridmetrics,no band is empty in every cell (other than surface stats),hard,TRUE,none,none,pass,2026-09-09 12:43
+10,gridmetrics,grid has the expected rows x columns for the tile,hard,TRUE,20x20,20x20,pass,2026-09-09 12:43
+10,gridmetrics,per-cell return counts match R,hard,FALSE,4,0 mismatched cells,fail,2026-09-09 12:43
+10,gridmetrics,no elev_max cell exceeds the tallest point above ground,hard,FALSE,39 cells; max 809.55,0 cells above 9.26 ft,fail,2026-09-09 12:43
+10,gridmetrics,CSV table has one row per raster cell,hard,TRUE,400,400,pass,2026-09-09 12:43
+10,gridmetrics,CSV elev_mean matches the raster band,hard,TRUE,0,all cells equal,pass,2026-09-09 12:43
+11,cloudmetrics,cloudmetrics tile: exits with status 0,hard,TRUE,0,0,pass,2026-09-09 12:43
+11,cloudmetrics,tile metrics CSV written,hard,TRUE,cloudmetrics_tile.csv,cloudmetrics_tile.csv,pass,2026-09-09 12:43
+11,cloudmetrics,tile: total points matches the tile,hard,TRUE,51737,51737,pass,2026-09-09 12:43
+11,cloudmetrics,tile: elev_max within the tallest point above ground,hard,FALSE,809.55,<= 9.26 ft,fail,2026-09-09 12:43
+11,cloudmetrics,tile: canopy points (> 2 ft) match R (within 1%),hard,FALSE,1458,94,fail,2026-09-09 12:43
+11,cloudmetrics,cloudmetrics /shape: exits with status 0,hard,TRUE,0,0,pass,2026-09-09 12:43
+11,cloudmetrics,per-plot metrics CSV written,hard,TRUE,cloudmetrics_plots.csv,cloudmetrics_plots.csv,pass,2026-09-09 12:43
+11,cloudmetrics,"/shape: one row per plot, labelled from /field",hard,TRUE,"plotA,plotB","plotA,plotB",pass,2026-09-09 12:43
+11,cloudmetrics,/shape: plotA point count within 0.5% of R,hard,TRUE,3840,3840,pass,2026-09-09 12:43
+11,cloudmetrics,/shape: plotB point count within 0.5% of R,hard,TRUE,3536,3536,pass,2026-09-09 12:43
+12,topometrics,topometrics ground DEM: exits with status 0,hard,TRUE,0,0,pass,2026-09-09 12:43
+12,topometrics,topometrics ground DEM raster written,hard,TRUE,topometrics_ground.tif,topometrics_ground.tif,pass,2026-09-09 12:43
+12,topometrics,topometrics ground DEM: output on the input DEM's grid,hard,TRUE,"2050775, 2050975,  410525,  410725","2050775, 2050975,  410525,  410725",pass,2026-09-09 12:43
+12,topometrics,topometrics ground DEM: keeps the input's coordinate system,soft,TRUE,none,none,pass,2026-09-09 12:43
+12,topometrics,topometrics ground DEM: interior cells have values,hard,TRUE,0,0,pass,2026-09-09 12:43
+12,topometrics,topometrics ground DEM: median |slope - terra| under 0.5 degrees,hard,TRUE,0,< 0.5,pass,2026-09-09 12:43
+12,topometrics,topometrics ground DEM: median aspect difference from terra under 5 degrees,hard,FALSE,65.74,< 5,fail,2026-09-09 12:43
+12,topometrics,topometrics external DTM: exits with status 0,hard,TRUE,0,0,pass,2026-09-09 12:43
+12,topometrics,topometrics external DTM raster written,hard,TRUE,topometrics_external_dtm.tif,topometrics_external_dtm.tif,pass,2026-09-09 12:43
+12,topometrics,topometrics external DTM: output on the input DEM's grid,hard,TRUE," 425744.95,  426257.28, 5180743.22, 5181255.55"," 425744.95,  426257.28, 5180743.22, 5181255.55",pass,2026-09-09 12:43
+12,topometrics,topometrics external DTM: keeps the input's coordinate system,soft,TRUE,present,present,pass,2026-09-09 12:43
+12,topometrics,topometrics external DTM: interior cells have values,hard,TRUE,0,0,pass,2026-09-09 12:43
+12,topometrics,topometrics external DTM: median |slope - terra| under 0.5 degrees,hard,TRUE,0,< 0.5,pass,2026-09-09 12:43
+12,topometrics,topometrics external DTM: median aspect difference from terra under 5 degrees,hard,FALSE,104.51,< 5,fail,2026-09-09 12:43
+13,gridsurfacestats,gridsurfacestats: exits with status 0,hard,TRUE,0,0,pass,2026-09-09 12:44
+13,gridsurfacestats,surface stats raster written,hard,TRUE,gridsurfacestats.tif,gridsurfacestats.tif,pass,2026-09-09 12:44
+13,gridsurfacestats,surface stats raster: raster sits on the tile's real coordinates,hard,TRUE,"2050775, 2050976,  410524,  410725","2050775, 2050975,  410525,  410725",pass,2026-09-09 12:44
+13,gridsurfacestats,surface stats raster: coordinate system attached,soft,FALSE,none,present,warn,2026-09-09 12:44
+13,gridsurfacestats,surface_area_ratio >= 1 everywhere,hard,TRUE,1,>= 1,pass,2026-09-09 12:44
+13,gridsurfacestats,roughness >= 0 everywhere,hard,TRUE,0.0213,>= 0,pass,2026-09-09 12:44
+13,gridsurfacestats,volume_diff = height difference x cell area,hard,FALSE,3585.3485,< 0.001,fail,2026-09-09 12:44
+14,canopymaxima,canopymaxima: exits with status 0,hard,TRUE,0,0,pass,2026-09-09 12:43
+14,canopymaxima,tree tops CSV written,hard,TRUE,tree_tops.csv,tree_tops.csv,pass,2026-09-09 12:43
+14,canopymaxima,at least one tree top found,hard,TRUE,46,> 0,pass,2026-09-09 12:43
+14,canopymaxima,every tree top inside the tile,hard,TRUE,0,0 outside,pass,2026-09-09 12:43
+14,canopymaxima,every tree top at least /minht (2 ft),hard,TRUE,2.24,>= 2,pass,2026-09-09 12:43
+14,canopymaxima,no tree top exceeds the tallest point above ground,hard,FALSE,3 tops; max 809.55,0 above 9.26 ft,fail,2026-09-09 12:43
+14,canopymaxima,each top's height equals the CHM at its X/Y,hard,FALSE,34,0 mismatched tops,fail,2026-09-09 12:43
+15,treeseg,treeseg: exits with status 0,hard,TRUE,0,0,pass,2026-09-09 12:43
+15,treeseg,segment raster written,hard,TRUE,crown_segments.tif,crown_segments.tif,pass,2026-09-09 12:43
+15,treeseg,crown table written,hard,TRUE,crown_summary.csv,crown_summary.csv,pass,2026-09-09 12:43
+15,treeseg,segment raster: raster sits on the tile's real coordinates,hard,TRUE,"2050775, 2050976,  410524,  410725","2050775, 2050975,  410525,  410725",pass,2026-09-09 12:43
+15,treeseg,segment raster: coordinate system attached,soft,FALSE,none,present,warn,2026-09-09 12:43
+15,treeseg,same crowns in the table and the raster,hard,TRUE,58,58,pass,2026-09-09 12:43
+15,treeseg,PixelCount matches the segment raster,hard,TRUE,0,0 mismatched crowns,pass,2026-09-09 12:43
+15,treeseg,MaxHeight matches the CHM within each crown,hard,TRUE,0,0 mismatched crowns,pass,2026-09-09 12:43
+15,treeseg,no crown exceeds the tallest point above ground,hard,FALSE,15 crowns; max 809.55,0 above 9.26 ft,fail,2026-09-09 12:43
+15,treeseg,crown area = pixel count x cell area,hard,TRUE,0,0 mismatched crowns,pass,2026-09-09 12:43
+15,treeseg,crown area column's unit label matches the tile's units (feet),soft,FALSE,CrownArea_m2,no m2 label on a feet-based tile,warn,2026-09-09 12:43
+16,pipeline,pipeline: exits with status 0,hard,TRUE,0,0,pass,2026-09-09 12:44
+16,pipeline,run state table written,hard,TRUE,pipeline_state.csv,pipeline_state.csv,pass,2026-09-09 12:44
+16,pipeline,no tile x stage failed,hard,TRUE,done,no failed status,pass,2026-09-09 12:44
+16,pipeline,four tiles processed,hard,TRUE,4,4,pass,2026-09-09 12:44
+16,pipeline,mosaicked canopy model written,hard,TRUE,canopymodel_merged.tif,a canopymodel .tif or .vrt,pass,2026-09-09 12:44
+16,pipeline,mosaicked CHM: raster sits on the tile's real coordinates,hard,TRUE,"2050772.01, 2050976.01,  410523.99,  410727.99","2050775, 2050975,  410525,  410725",pass,2026-09-09 12:44
+16,pipeline,mosaicked CHM matches single-run CHM (median diff < 0.5 ft),hard,TRUE,0.256,< 0.5 ft,pass,2026-09-09 12:44
+16,pipeline,no mosaicked CHM cell exceeds the tallest point above ground,hard,FALSE,134,0,fail,2026-09-09 12:44
+16,pipeline,combined tree tops table written,hard,TRUE,1,>= 1,pass,2026-09-09 12:44
+16,pipeline,no duplicate tree tops across tile seams,hard,FALSE,1,0,fail,2026-09-09 12:44

@@ -1,0 +1,1212 @@
+---
+title: "Every FUSION2 Tool on One Example Tile, With Output Checks"
+author: "Jacob Strunk"
+date: today
+format: html
+execute:
+  echo: true
+  warning: false
+  message: false
+---
+
+<!--
+Pipeline script -- runs every one of the 15 FUSION2 command-line tools
+against the small example lidar tile, then checks each tool's output
+against an independent calculation made in R (lidR/terra/sf). Follows the
+pipeline template (execution-ordered "# Step N" headings), not the
+manuscript-style analysis template.
+-->
+
+# Setup
+
+## Reset working directory to the project root
+
+This script lives in `R/analysis/`, but Quarto runs chunks from the
+`.qmd`'s own folder, so project-relative paths need the working directory
+moved to the project root. The setting takes effect from the next chunk.
+
+```{r}
+#| label: root-dir
+
+knitr::opts_knit$set(root.dir = "../..")
+```
+
+## Load libraries and set default options
+
+Loads the packages used for independent checks: `lidR` reads the point
+clouds, `terra` and `sf` handle rasters and polygons, and `data.table`
+holds the check log.
+
+```{r}
+#| label: setup
+
+#1. load packages
+#  - lidR also defines a crs() function, so every terra call below is
+#    written as terra::fn() to avoid picking up the wrong one
+library(data.table)
+library(terra)
+library(sf)
+library(lidR)
+library(ggplot2)
+library(RForInvt)
+
+knitr::opts_chunk$set(
+    echo      = TRUE
+  , warning   = FALSE
+  , message   = FALSE
+  , fig.width  = 7
+  , fig.height = 5
+  )
+
+options(scipen = 10E6)
+
+#2. set project directories
+dir_lidar_raw = file.path("data", "raw", "lidar")
+dir_dtm_raw   = file.path("data", "raw", "lidar_dtm_examples")
+dir_derived   = file.path("data", "derived", "all_tools_example")
+dir_tables    = file.path("output", "tables")
+dir.create(dir_derived, recursive = TRUE, showWarnings = FALSE)
+dir.create(dir_tables, recursive = TRUE, showWarnings = FALSE)
+
+#3. mint one versioned run folder that every tool writes into
+#  - file_version() returns a new versioned path each run; it is used
+#    here as a folder, so one run's 30-odd tool outputs stay together
+dir_run = RForInvt::file_version(
+    file.path(dir_derived, "run")
+  , increment = TRUE
+  , note = "all-tools demonstration run"
+  )
+dir.create(dir_run, recursive = TRUE, showWarnings = FALSE)
+dir_run = normalizePath(dir_run, winslash = "/")
+cat("Tool outputs for this run go to:", dir_run, "\n")
+
+#4. locate the FUSION2 tools
+#  - the compiled tools are not bundled with this repo -- build FUSION2
+#    from source (https://github.com/jstrunk001/FUSION2) and either put
+#    its bin/ folder on PATH or point FUSION2_BIN_DIR at it
+fn_find_fusion_tool = function(tool_name){
+  path_on_path = Sys.which(tool_name)
+  if(nzchar(path_on_path)) return(normalizePath(path_on_path, winslash = "/"))
+  dir_env = Sys.getenv("FUSION2_BIN_DIR")
+  path_in_env_dir = file.path(dir_env, tool_name)
+  if(nzchar(dir_env) && file.exists(path_in_env_dir)) return(normalizePath(path_in_env_dir, winslash = "/"))
+  stop(
+      "Could not find ", tool_name, ". Build FUSION2 from source "
+    , "(https://github.com/jstrunk001/FUSION2) and either add its bin/ "
+    , "folder to PATH or set the FUSION2_BIN_DIR environment variable to it."
+    )
+  }
+
+nms_tools = c(
+    "catalog", "filterdata", "thindata", "groundfilter", "clipdata"
+  , "canopymodel", "returndensity", "densitymetrics", "gridmetrics"
+  , "cloudmetrics", "topometrics", "gridsurfacestats", "canopymaxima"
+  , "treeseg", "pipeline"
+  )
+path_tools = sapply(paste0(nms_tools, ".exe"), fn_find_fusion_tool)
+names(path_tools) = nms_tools
+
+#5. record which build is being tested, so the check log can be tied to it
+dt_build = data.table::data.table(
+    tool     = nms_tools
+  , path     = path_tools
+  , modified = format(file.info(path_tools)$mtime, "%Y-%m-%d %H:%M")
+  )
+print(dt_build)
+
+#6. point at the example tile and one external DTM
+#  - the tile is the same 200 x 200 ft USGS 3DEP clip used by scripts
+#    001-004; see 001 for its source and the LAS 1.2 re-encoding
+#  - the external DTM is a real USGS bare-earth raster with a coordinate
+#    system attached, used to check that raster-in/raster-out tools carry
+#    that coordinate system through
+path_las = normalizePath(file.path(dir_lidar_raw, "USGS_LPC_WA_6County_A24_w2049750n409500_clip200ft_las12.las"), winslash = "/")
+path_dtm_external = normalizePath(file.path(dir_dtm_raw, "site_grays_harbor", "usgs_lidar_dtm.tif"), winslash = "/")
+if(!file.exists(path_las)) stop("Example lidar tile not found at ", path_las)
+if(!file.exists(path_dtm_external)) stop("External example DTM not found at ", path_dtm_external)
+```
+
+## Define helper functions used throughout this script
+
+Every check in this script goes into one running log instead of stopping
+the script. The point of the script is to list every problem in one pass.
+Stopping at the first failure would hide the rest. The script stops only
+when an output that later steps depend on (the ground DEM or the canopy
+height model) is missing entirely.
+
+Each check carries a severity. `hard` means the output is wrong or missing.
+`soft` means the output works but something about it deserves a look, such
+as a unit label that doesn't match the data or missing coordinate-system
+metadata.
+
+```{r}
+#| label: helper-functions
+
+#1. create the running check log
+#  - an environment is used so helpers can append to it from inside
+#    function calls
+env_checks = new.env()
+env_checks$rows = list()
+
+#2. define a helper that records one check result and prints it
+#  - a check whose result can't be computed (NA) counts as a failure,
+#    because an output that can't be evaluated isn't a confirmed pass
+fn_check = function(step, tool, check, passed, observed = "", expected = "", severity = "hard"){
+  passed_in = isTRUE(passed)
+  row_i = data.table::data.table(
+      step     = step
+    , tool     = tool
+    , check    = check
+    , severity = severity
+    , passed   = passed_in
+    , observed = paste(format(observed, digits = 8), collapse = ", ")
+    , expected = paste(format(expected, digits = 8), collapse = ", ")
+    )
+  env_checks$rows[[length(env_checks$rows) + 1]] = row_i
+  status_label = if(passed_in) "PASS" else if(severity == "hard") "FAIL" else "WARN"
+  cat(sprintf("[%s] %s | %s | observed: %s | expected: %s\n", status_label, tool, check, row_i$observed, row_i$expected))
+  invisible(passed_in)
+  }
+
+#3. define a helper that runs one tool, prints its console output, and logs
+#   whether it exited cleanly
+#  - uses try() so a crashing tool is logged, not fatal
+fn_run_tool = function(step, tool, args, run_label){
+  cat("\n---", run_label, "---\n", path_tools[[tool]], paste(args, collapse = " "), "\n")
+  result = try(system2(path_tools[[tool]], args = args, stdout = TRUE, stderr = TRUE), silent = TRUE)
+  exit_status = attr(result, "status")
+  exit_status = if(is.null(exit_status)) 0L else exit_status
+  if(inherits(result, "try-error")) exit_status = -1L
+  cat(paste(result, collapse = "\n"), "\n")
+  fn_check(step, tool, paste0(run_label, ": exits with status 0"), exit_status == 0, exit_status, 0)
+  invisible(list(exit_status = exit_status, console = as.character(result)))
+  }
+
+#4. define a helper that checks an output file exists and isn't empty
+fn_check_file = function(step, tool, path, what){
+  exists_nonempty = file.exists(path) && file.info(path)$size > 0
+  fn_check(step, tool, paste0(what, " written"), exists_nonempty, if(exists_nonempty) basename(path) else "missing", basename(path))
+  exists_nonempty
+  }
+
+#5. define a helper that checks a raster covers the tile's real
+#   coordinates
+#  - a grid may run past the tile edge by up to one cell when the tile
+#    width isn't a multiple of the cell size; anything beyond that means
+#    the raster is misplaced
+fn_check_raster_extent = function(step, tool, r, what){
+  ext_r = as.vector(terra::ext(r))
+  cell_max = max(terra::res(r))
+  off_left   = ext_tile[["xmin"]] - ext_r[["xmin"]]
+  off_right  = ext_r[["xmax"]] - ext_tile[["xmax"]]
+  off_bottom = ext_tile[["ymin"]] - ext_r[["ymin"]]
+  off_top    = ext_r[["ymax"]] - ext_tile[["ymax"]]
+  offsets = c(off_left, off_right, off_bottom, off_top)
+  within_one_cell = all(offsets > -0.01 & offsets <= cell_max + 0.01)
+  fn_check(step, tool, paste0(what, ": raster sits on the tile's real coordinates"), within_one_cell, round(ext_r, 2), round(ext_tile, 2))
+  }
+
+#6. define a helper that checks a raster has a coordinate system attached
+fn_check_raster_crs = function(step, tool, r, what){
+  has_crs = nzchar(terra::crs(r))
+  fn_check(step, tool, paste0(what, ": coordinate system attached"), has_crs, if(has_crs) "present" else "none", "present", severity = "soft")
+  }
+
+#7. define a helper that summarizes every band of a raster in one table
+fn_raster_overview = function(r){
+  v = terra::values(r)
+  data.table::data.table(
+      band    = names(r)
+    , n_cells = nrow(v)
+    , n_na    = colSums(is.na(v))
+    , min     = suppressWarnings(apply(v, 2, min, na.rm = TRUE))
+    , mean    = suppressWarnings(apply(v, 2, mean, na.rm = TRUE))
+    , max     = suppressWarnings(apply(v, 2, max, na.rm = TRUE))
+    )
+  }
+
+#8. define a helper that reads a LAS/LAZ output quietly, or returns NULL
+fn_read_las = function(path){
+  if(!file.exists(path)) return(NULL)
+  suppressWarnings(lidR::readLAS(path))
+  }
+
+#9. define a helper that builds a reference grid on the tile's own
+#   coordinates, for rasterizing points in R the same way the tools should
+#  - origin at the tile's lower-left corner, rows counted down from the
+#    top, one extra row/column when the width isn't a multiple of the cell
+fn_reference_grid = function(cellsize){
+  n_col = ceiling((ext_tile[["xmax"]] - ext_tile[["xmin"]]) / cellsize)
+  n_row = ceiling((ext_tile[["ymax"]] - ext_tile[["ymin"]]) / cellsize)
+  terra::rast(
+      xmin = ext_tile[["xmin"]]
+    , xmax = ext_tile[["xmin"]] + n_col * cellsize
+    , ymin = ext_tile[["ymax"]] - n_row * cellsize
+    , ymax = ext_tile[["ymax"]]
+    , resolution = cellsize
+    , crs = crs_tile_wkt
+    )
+  }
+
+#10. define a helper that looks up a ground raster's height under each
+#    point, returning NA for points outside the raster
+fn_ground_at_points = function(r_ground, x, y){
+  terra::extract(r_ground, cbind(x, y), method = "bilinear")[ , 1]
+  }
+
+#11. define a helper that plots a raster band as a map, with an optional
+#    set of highlighted cells
+fn_plot_raster_map = function(r, band, title, highlight_above = NULL){
+  df_r = as.data.frame(r[[band]], xy = TRUE, na.rm = FALSE)
+  names(df_r) = c("x", "y", "value")
+  p = ggplot2::ggplot(df_r, ggplot2::aes(x = x, y = y, fill = value)) +
+    ggplot2::geom_raster() +
+    ggplot2::scale_fill_viridis_c(name = band, na.value = "grey85") +
+    ggplot2::coord_equal() +
+    ggplot2::labs(title = title, x = "x", y = "y") +
+    ggplot2::theme_minimal(base_size = 11)
+  if(!is.null(highlight_above)) {
+    df_hi = df_r[!is.na(df_r$value) & df_r$value > highlight_above, ]
+    p = p + ggplot2::geom_tile(data = df_hi, ggplot2::aes(x = x, y = y), fill = NA, colour = "red", linewidth = 0.4, inherit.aes = FALSE)
+    }
+  p
+  }
+```
+
+# Overview
+
+This script runs each of the 15 FUSION2 tools on the example tile. It then
+checks every output against an independent result computed in R from the
+same points. Each check asks one of three questions:
+
+1. Was the output written, and is it on the tile's real coordinates?
+2. Do counts match exactly what the options asked for? For example, a
+   first-returns filter should keep exactly the tile's first returns.
+3. Are the values physically plausible? For example, no height above
+   ground should exceed the tallest point in the tile.
+
+Step 1 reads the tile in R and builds the reference values the later
+steps compare against. Steps 2-16 run one tool each, in the order a real
+workflow would call them: point-cloud tools first, then the ground DEM,
+then the tools that depend on it. Step 17 gathers every check into one
+table.
+
+Two groups of tool options are covered by the earlier scripts rather than
+repeated here: `gridmetrics`' batch/tiled mode and SQLite table output
+(001 and 003), and `pipeline`'s many stage chains (003 and 004).
+
+# Step 1: Read the tile in R and build reference values
+
+The references below come from `lidR` and `terra` rather than FUSION2, so
+agreement means two independent implementations reached the same answer.
+The reference ground surface uses `lidR`'s triangulation of the tile's own
+ground-classified points (class 2). Heights above ground are computed
+against that surface.
+
+```{r}
+#| label: step-1-reference
+
+#1. read the tile and record its basic properties
+las = suppressWarnings(lidR::readLAS(path_las))
+n_points = lidR::npoints(las)
+ext_tile = c(
+    xmin = las@header$`Min X`
+  , xmax = las@header$`Max X`
+  , ymin = las@header$`Min Y`
+  , ymax = las@header$`Max Y`
+  )
+z_range = range(las$Z)
+crs_tile_wkt = sf::st_as_text(sf::st_crs(las))
+
+#2. tabulate returns, classes, and withheld points
+#  - "withheld" points are flagged in the LAS file as ones that should be
+#    treated as deleted; later steps check whether the tools drop them
+dt_tile_summary = data.table::data.table(
+    n_points       = n_points
+  , n_first_return = sum(las$ReturnNumber == 1)
+  , n_ground       = sum(las$Classification == 2)
+  , n_noise        = sum(las$Classification == 7)
+  , n_withheld     = sum(las$Withheld_flag)
+  , z_min          = z_range[1]
+  , z_max          = z_range[2]
+  )
+print(ext_tile)
+print(dt_tile_summary)
+
+#3. build the reference ground surface and heights above ground
+#  - the tallest reference height sets the upper limit for any height a
+#    tool reports; 5 ft of slack allows for interpolation differences
+#    between lidR's triangulation and FUSION2's ground model
+las_ground = lidR::filter_poi(las, Classification == 2L)
+r_ground_ref = suppressWarnings(lidR::rasterize_terrain(las, res = 5, algorithm = lidR::tin()))
+las_norm = suppressWarnings(lidR::normalize_height(las, algorithm = lidR::tin()))
+height_max_ref = max(las_norm$Z)
+height_limit = height_max_ref + 5
+cat("Tallest reference height above ground:", round(height_max_ref, 2), "ft; plausibility limit:", round(height_limit, 2), "ft\n")
+
+#4. interrogate the references before relying on them
+#  - the ground surface must span the tile's elevation range, and no
+#    point should sit far below it
+if(any(is.na(las_norm$Z))) stop("Reference height normalization left NA heights.")
+if(min(las_norm$Z) < -5) warning("Some points sit more than 5 ft below the reference ground surface.")
+fn_check(1, "reference", "reference heights stay within a plausible range", height_max_ref < 300 & min(las_norm$Z) > -10, round(range(las_norm$Z), 2), "-10 to 300 ft")
+```
+
+# Step 2: Summarize the tile with `catalog`
+
+`catalog` reports each input file's point count and bounding box, and with
+`/density:<cellsize>` also writes a point-density raster.
+
+```{r}
+#| label: step-2-catalog
+
+#1. run catalog with both the CSV report and the density raster requested
+dir_catalog = file.path(dir_run, "catalog")
+dir.create(dir_catalog, showWarnings = FALSE)
+path_catalog_csv = file.path(dir_catalog, "catalog.csv")
+fn_run_tool(2, "catalog", c(path_las, paste0("/output:", path_catalog_csv), "/density:10"), "catalog")
+
+#2. check the CSV report against the tile read in R
+#  - bounds should match the LAS header to the header's own precision
+#    (0.01 ft); a larger gap means the CSV rounded the coordinates
+if(fn_check_file(2, "catalog", path_catalog_csv, "CSV report")) {
+  dt_catalog = data.table::fread(path_catalog_csv)
+  print(dt_catalog)
+  fn_check(2, "catalog", "point count matches the tile", dt_catalog$PointCount == n_points, dt_catalog$PointCount, n_points)
+  bounds_catalog = c(dt_catalog$MinX, dt_catalog$MaxX, dt_catalog$MinY, dt_catalog$MaxY)
+  bounds_tile    = c(ext_tile[["xmin"]], ext_tile[["xmax"]], ext_tile[["ymin"]], ext_tile[["ymax"]])
+  fn_check(2, "catalog", "XY bounds match the tile within 0.01 ft", all(abs(bounds_catalog - bounds_tile) <= 0.01), bounds_catalog, bounds_tile)
+  fn_check(2, "catalog", "Z range matches the tile within 0.01 ft", all(abs(c(dt_catalog$MinZ, dt_catalog$MaxZ) - z_range) <= 0.01), c(dt_catalog$MinZ, dt_catalog$MaxZ), z_range)
+  }
+
+#3. check that /density produced a raster, and that it accounts for every
+#   point when multiplied back out by cell area
+paths_catalog_tif = list.files(dir_catalog, pattern = "\\.tif$", full.names = TRUE)
+fn_check(2, "catalog", "/density raster written", length(paths_catalog_tif) > 0, length(paths_catalog_tif), ">= 1 .tif")
+if(length(paths_catalog_tif) > 0) {
+  r_catalog_density = terra::rast(paths_catalog_tif[1])
+  n_implied = sum(terra::values(r_catalog_density[[1]]), na.rm = TRUE) * prod(terra::res(r_catalog_density))
+  fn_check(2, "catalog", "density raster x cell area sums to the point count (within 0.5%)", abs(n_implied - n_points) / n_points < 0.005, round(n_implied), n_points)
+  }
+```
+
+# Step 3: Filter points with `filterdata`
+
+`filterdata` keeps points by return number, classification, or elevation
+band. Each run below is checked two ways: the kept count must equal the
+count R finds with the same rule, and every kept point must satisfy the
+rule.
+
+```{r}
+#| label: step-3-filterdata
+
+#1. define the three filters and the rule R uses to reproduce each
+dir_filter = file.path(dir_run, "filterdata")
+dir.create(dir_filter, showWarnings = FALSE)
+dt_filters = data.table::data.table(
+    run  = c("first_returns", "ground_class", "z_780_800")
+  , args = list("/return:1", "/class:2", c("/minz:780", "/maxz:800"))
+  )
+fn_filter_rule = function(run, x){
+  if(run == "first_returns") return(x$ReturnNumber == 1)
+  if(run == "ground_class")  return(x$Classification == 2)
+  x$Z >= 780 & x$Z <= 800
+  }
+
+#2. run each filter and check it
+for(i in seq_len(nrow(dt_filters))) {
+  run_i = dt_filters$run[i]
+  path_out_i = file.path(dir_filter, paste0(run_i, ".las"))
+  fn_run_tool(3, "filterdata", c(path_las, paste0("/output:", path_out_i), dt_filters$args[[i]]), paste0("filterdata ", run_i))
+
+  #  - count kept vs. count R expects
+  n_expected_i = sum(fn_filter_rule(run_i, las))
+  las_out_i = fn_read_las(path_out_i)
+  if(fn_check(3, "filterdata", paste0(run_i, ": output readable"), !is.null(las_out_i), if(is.null(las_out_i)) "unreadable" else "ok", "ok")) {
+    fn_check(3, "filterdata", paste0(run_i, ": kept count matches R"), lidR::npoints(las_out_i) == n_expected_i, lidR::npoints(las_out_i), n_expected_i)
+    fn_check(3, "filterdata", paste0(run_i, ": every kept point satisfies the filter"), all(fn_filter_rule(run_i, las_out_i)), sum(!fn_filter_rule(run_i, las_out_i)), "0 violations")
+    fn_check(3, "filterdata", paste0(run_i, ": coordinate system kept"), !is.na(sf::st_crs(las_out_i)), if(is.na(sf::st_crs(las_out_i))) "none" else "present", "present", severity = "soft")
+    fn_check(3, "filterdata", paste0(run_i, ": withheld points dropped"), sum(las_out_i$Withheld_flag) == 0, sum(las_out_i$Withheld_flag), 0, severity = "soft")
+    }
+  }
+```
+
+# Step 4: Thin points with `thindata`
+
+`thindata` keeps at most one point per grid cell. Its grid lines fall on
+whole multiples of the cell size (x = 0, 2, 4, ... ft), not on the tile's
+own corner. The check rebuilds that same 2 ft grid in R and confirms that
+no cell holds two kept points and that the number kept equals the number
+of occupied cells. It also confirms that every kept point exists in the
+original tile.
+
+```{r}
+#| label: step-4-thindata
+
+#1. run thindata at a 2 ft cell size
+cellsize_thin = 2
+path_thin = file.path(dir_run, "thindata.las")
+fn_run_tool(4, "thindata", c(path_las, paste0("/output:", path_thin), paste0("/cellsize:", cellsize_thin)), "thindata")
+
+#2. assign every point (original and kept) to its 2 ft cell, on a grid
+#   whose lines fall on whole multiples of the cell size
+fn_cell_id = function(x, y){
+  paste(floor(x / cellsize_thin), floor(y / cellsize_thin))
+  }
+n_cells_occupied = data.table::uniqueN(fn_cell_id(las$X, las$Y))
+
+#3. check the kept points
+las_thin = fn_read_las(path_thin)
+if(fn_check(4, "thindata", "output readable", !is.null(las_thin), if(is.null(las_thin)) "unreadable" else "ok", "ok")) {
+  cells_thin = fn_cell_id(las_thin$X, las_thin$Y)
+  fn_check(4, "thindata", "no cell keeps more than one point", !anyDuplicated(cells_thin), sum(duplicated(cells_thin)), "0 duplicate cells")
+  fn_check(4, "thindata", "kept count equals occupied cells", lidR::npoints(las_thin) == n_cells_occupied, lidR::npoints(las_thin), n_cells_occupied)
+  key_tile = paste(las$X, las$Y, las$Z)
+  key_thin = paste(las_thin$X, las_thin$Y, las_thin$Z)
+  fn_check(4, "thindata", "every kept point exists in the tile", all(key_thin %in% key_tile), sum(!key_thin %in% key_tile), "0 new points")
+  }
+```
+
+# Step 5: Build a ground DEM with `groundfilter`
+
+`groundfilter` interpolates a ground surface raster, and with
+`/output-points` also writes the points it classed as ground. Every later
+tool that reports height above ground uses this DEM, so the script stops
+here if the DEM is missing.
+
+```{r}
+#| label: step-5-groundfilter
+
+#1. run groundfilter with both outputs requested
+cellsize_ground = 5
+path_ground_dem = file.path(dir_run, "ground_dem.tif")
+path_ground_pts = file.path(dir_run, "ground_points.las")
+fn_run_tool(5, "groundfilter", c(
+    path_las
+  , paste0("/output-raster:", path_ground_dem)
+  , paste0("/output-points:", path_ground_pts)
+  , paste0("/cellsize:", cellsize_ground)
+  ), "groundfilter")
+
+#2. stop if the DEM is missing -- later steps can't run without it
+if(!fn_check_file(5, "groundfilter", path_ground_dem, "ground DEM")) stop("groundfilter wrote no ground DEM; later steps depend on it.")
+r_ground = terra::rast(path_ground_dem)
+print(fn_raster_overview(r_ground))
+
+#3. check the DEM's placement, completeness, and values
+fn_check_raster_extent(5, "groundfilter", r_ground, "ground DEM")
+fn_check_raster_crs(5, "groundfilter", r_ground, "ground DEM")
+v_ground = terra::values(r_ground)[ , 1]
+fn_check(5, "groundfilter", "ground DEM has no empty cells", !any(is.na(v_ground)), sum(is.na(v_ground)), 0)
+z_ground_pts = range(las_ground$Z)
+fn_check(5, "groundfilter", "ground DEM stays within the ground points' elevation range (+/- 1 ft)", min(v_ground, na.rm = TRUE) >= z_ground_pts[1] - 1 & max(v_ground, na.rm = TRUE) <= z_ground_pts[2] + 1, round(range(v_ground, na.rm = TRUE), 2), round(z_ground_pts, 2))
+
+#4. compare against the lidR reference ground surface, cell by cell
+#  - the reference is resampled onto the FUSION2 grid, so the comparison
+#    only covers cells both rasters cover
+r_ground_ref_aligned = terra::resample(r_ground_ref, r_ground, method = "bilinear")
+diff_ground = abs(terra::values(r_ground)[ , 1] - terra::values(r_ground_ref_aligned)[ , 1])
+fn_check(5, "groundfilter", "median |FUSION2 - lidR| ground difference under 1 ft", stats::median(diff_ground, na.rm = TRUE) < 1, round(stats::median(diff_ground, na.rm = TRUE), 3), "< 1 ft")
+fn_check(5, "groundfilter", "95th percentile |FUSION2 - lidR| ground difference under 3 ft", stats::quantile(diff_ground, 0.95, na.rm = TRUE) < 3, round(stats::quantile(diff_ground, 0.95, na.rm = TRUE), 3), "< 3 ft")
+
+#5. check the ground-points output
+las_ground_out = fn_read_las(path_ground_pts)
+if(fn_check(5, "groundfilter", "/output-points LAS written", !is.null(las_ground_out), if(is.null(las_ground_out)) "missing" else "present", "present")) {
+  fn_check(5, "groundfilter", "/output-points holds only ground-classed points", all(las_ground_out$Classification == 2), paste(sort(unique(las_ground_out$Classification)), collapse = ","), "2")
+  }
+
+#6. plot FUSION2 ground (x) against the lidR reference (y)
+dt_ground_cmp = data.table::data.table(fusion2 = terra::values(r_ground)[ , 1], lidr_reference = terra::values(r_ground_ref_aligned)[ , 1])
+ggplot2::ggplot(dt_ground_cmp, ggplot2::aes(x = fusion2, y = lidr_reference)) +
+  ggplot2::geom_abline(slope = 1, intercept = 0, colour = "grey50") +
+  ggplot2::geom_point(alpha = 0.5) +
+  ggplot2::coord_equal() +
+  ggplot2::labs(title = "Ground DEM: FUSION2 vs. lidR reference", x = "FUSION2 groundfilter (ft)", y = "lidR TIN reference (ft)") +
+  ggplot2::theme_minimal(base_size = 11)
+```
+
+# Step 6: Clip points with `clipdata`
+
+`clipdata` keeps points inside a bounding box, inside polygons, or outside
+polygons. With `/ground`, the `/minz`/`/maxz` limits apply to height above
+ground rather than raw elevation. Two small circular plots are drawn in R
+to exercise the polygon options.
+
+```{r}
+#| label: step-6-clipdata
+
+dir_clip = file.path(dir_run, "clipdata")
+dir.create(dir_clip, showWarnings = FALSE)
+
+#1. clip to a 100 x 100 ft box and check it against R
+box_clip = c(xmin = 2050800, ymin = 410550, xmax = 2050900, ymax = 410650)
+arg_box = paste0("/extent:", paste(box_clip[c("xmin", "ymin", "xmax", "ymax")], collapse = ","))
+path_clip_box = file.path(dir_clip, "box.las")
+fn_run_tool(6, "clipdata", c(path_las, paste0("/output:", path_clip_box), arg_box), "clipdata box")
+in_box = las$X >= box_clip[["xmin"]] & las$X <= box_clip[["xmax"]] & las$Y >= box_clip[["ymin"]] & las$Y <= box_clip[["ymax"]]
+las_clip_box = fn_read_las(path_clip_box)
+if(fn_check(6, "clipdata", "box: output readable", !is.null(las_clip_box), if(is.null(las_clip_box)) "unreadable" else "ok", "ok")) {
+  fn_check(6, "clipdata", "box: kept count matches R", lidR::npoints(las_clip_box) == sum(in_box), lidR::npoints(las_clip_box), sum(in_box))
+  }
+
+#2. clip the same box by height above ground (2-200 ft) and check it
+#  - heights are recomputed in R against the FUSION2 ground DEM itself,
+#    so this checks the clip logic, not the DEM
+path_clip_ht = file.path(dir_clip, "box_height_2_200.las")
+fn_run_tool(6, "clipdata", c(path_las, paste0("/output:", path_clip_ht), arg_box, paste0("/ground:", path_ground_dem), "/minz:2", "/maxz:200"), "clipdata box + height")
+height_vs_fusion_ground = las$Z - fn_ground_at_points(r_ground, las$X, las$Y)
+n_expected_ht = sum(in_box & height_vs_fusion_ground >= 2 & height_vs_fusion_ground <= 200, na.rm = TRUE)
+las_clip_ht = fn_read_las(path_clip_ht)
+if(fn_check(6, "clipdata", "box + height: output readable", !is.null(las_clip_ht), if(is.null(las_clip_ht)) "unreadable" else "ok", "ok")) {
+  height_out = las_clip_ht$Z - fn_ground_at_points(r_ground, las_clip_ht$X, las_clip_ht$Y)
+  fn_check(6, "clipdata", "box + height: kept count within 10% of R", abs(lidR::npoints(las_clip_ht) - n_expected_ht) <= max(2, 0.10 * n_expected_ht), lidR::npoints(las_clip_ht), n_expected_ht)
+  fn_check(6, "clipdata", "box + height: every kept point is 2-200 ft above ground (+/- 0.5 ft)", all(height_out >= 1.5 & height_out <= 200.5, na.rm = TRUE), round(range(height_out, na.rm = TRUE), 2), "1.5 to 200.5 ft")
+  }
+
+#3. build two 30 ft radius circular plots as a shapefile
+path_plots_shp = file.path(dir_clip, "example_plots.shp")
+sf_plots = sf::st_sf(
+    plot_id = c("plotA", "plotB")
+  , geometry = sf::st_sfc(
+        sf::st_buffer(sf::st_point(c(2050825, 410575)), 30)
+      , sf::st_buffer(sf::st_point(c(2050925, 410675)), 30)
+      , crs = sf::st_crs(las)
+      )
+  )
+sf::st_write(sf_plots, path_plots_shp, quiet = TRUE, append = FALSE)
+
+#4. count points inside each plot in R
+sf_pts = sf::st_as_sf(data.table::data.table(X = las$X, Y = las$Y), coords = c("X", "Y"), crs = sf::st_crs(las))
+mat_in_plot = sf::st_within(sf_pts, sf_plots, sparse = FALSE)
+n_in_plot = colSums(mat_in_plot)
+names(n_in_plot) = sf_plots$plot_id
+
+#5. clip one file per plot, named by plot_id, and check each count
+#  - points exactly on a circle's edge can fall either way, so counts may
+#    differ by a handful of points
+dir_clip_multi = file.path(dir_clip, "per_plot")
+dir.create(dir_clip_multi, showWarnings = FALSE)
+fn_run_tool(6, "clipdata", c(path_las, paste0("/output:", dir_clip_multi), paste0("/shape:", path_plots_shp), "/multifile", "/field:plot_id"), "clipdata /multifile")
+for(plot_i in names(n_in_plot)) {
+  path_plot_i = list.files(dir_clip_multi, pattern = paste0("^", plot_i, "\\.la[sz]$"), full.names = TRUE)
+  fn_check(6, "clipdata", paste0("/multifile: ", plot_i, " file named from /field"), length(path_plot_i) == 1, length(path_plot_i), 1)
+  if(length(path_plot_i) == 1) {
+    n_plot_i = lidR::npoints(fn_read_las(path_plot_i))
+    fn_check(6, "clipdata", paste0("/multifile: ", plot_i, " count within 0.5% of R"), abs(n_plot_i - n_in_plot[[plot_i]]) <= max(3, 0.005 * n_in_plot[[plot_i]]), n_plot_i, n_in_plot[[plot_i]])
+    }
+  }
+
+#6. clip everything outside both plots and check it is the complement
+path_clip_outside = file.path(dir_clip, "outside_plots.las")
+fn_run_tool(6, "clipdata", c(path_las, paste0("/output:", path_clip_outside), paste0("/shape:", path_plots_shp), "/outside"), "clipdata /outside")
+las_clip_outside = fn_read_las(path_clip_outside)
+if(fn_check(6, "clipdata", "/outside: output readable", !is.null(las_clip_outside), if(is.null(las_clip_outside)) "unreadable" else "ok", "ok")) {
+  n_outside_expected = n_points - sum(rowSums(mat_in_plot) > 0)
+  fn_check(6, "clipdata", "/outside: count equals tile minus in-plot points (within 0.5%)", abs(lidR::npoints(las_clip_outside) - n_outside_expected) <= 0.005 * n_outside_expected, lidR::npoints(las_clip_outside), n_outside_expected)
+  }
+```
+
+# Step 7: Build canopy height models with `canopymodel`
+
+`canopymodel` grids the highest point in each cell and subtracts the
+ground DEM. Three versions are built: plain, smoothed (`/smooth:3`), and
+slope-adjusted (`/slope`). The reference canopy model rasterizes the same
+highest points in R, measured against the FUSION2 ground DEM, onto the
+same grid.
+
+The most important check is the height ceiling. No canopy cell may be
+taller than the tallest point above ground in the tile. A cell far above
+that ceiling holds a raw elevation, meaning the ground was never
+subtracted.
+
+```{r}
+#| label: step-7-canopymodel
+
+#1. build the three canopy height models
+cellsize_chm = 3
+path_chm = file.path(dir_run, "chm.tif")
+path_chm_smooth = file.path(dir_run, "chm_smooth3.tif")
+path_chm_slope = file.path(dir_run, "chm_slope.tif")
+args_chm_common = c(path_las, paste0("/ground:", path_ground_dem), paste0("/cellsize:", cellsize_chm))
+fn_run_tool(7, "canopymodel", c(args_chm_common, paste0("/output:", path_chm)), "canopymodel")
+fn_run_tool(7, "canopymodel", c(args_chm_common, paste0("/output:", path_chm_smooth), "/smooth:3"), "canopymodel /smooth:3")
+fn_run_tool(7, "canopymodel", c(args_chm_common, paste0("/output:", path_chm_slope), "/slope"), "canopymodel /slope")
+
+#2. stop if the plain model is missing -- Steps 13-15 depend on it
+if(!fn_check_file(7, "canopymodel", path_chm, "canopy height model")) stop("canopymodel wrote no CHM; later steps depend on it.")
+r_chm = terra::rast(path_chm)
+print(fn_raster_overview(r_chm))
+fn_check_raster_extent(7, "canopymodel", r_chm, "CHM")
+fn_check_raster_crs(7, "canopymodel", r_chm, "CHM")
+
+#3. check the height range
+#  - small negative heights are normal (a return slightly below the
+#    interpolated ground); more than 1 ft below is not
+v_chm = terra::values(r_chm)[ , 1]
+n_chm_too_tall = sum(v_chm > height_limit, na.rm = TRUE)
+fn_check(7, "canopymodel", "no CHM cell exceeds the tallest point above ground", n_chm_too_tall == 0, paste0(n_chm_too_tall, " cells; max ", round(max(v_chm, na.rm = TRUE), 2)), paste0("0 cells above ", round(height_limit, 2), " ft"))
+fn_check(7, "canopymodel", "no CHM cell more than 1 ft below ground", min(v_chm, na.rm = TRUE) >= -1, round(min(v_chm, na.rm = TRUE), 2), ">= -1 ft")
+
+#4. compare with the reference canopy model on the same grid
+#  - the comparison is limited to cells both models consider plausible,
+#    so the height-ceiling failures above don't mask agreement elsewhere
+height_above_fusion_ground = las$Z - fn_ground_at_points(r_ground, las$X, las$Y)
+v_pts = terra::vect(cbind(las$X, las$Y), crs = crs_tile_wkt, atts = data.frame(h = height_above_fusion_ground))
+r_chm_ref = terra::rasterize(v_pts, r_chm, field = "h", fun = max)
+v_chm_ref = terra::values(r_chm_ref)[ , 1]
+keep_cmp = !is.na(v_chm) & !is.na(v_chm_ref) & v_chm <= height_limit
+diff_chm = abs(v_chm[keep_cmp] - v_chm_ref[keep_cmp])
+fn_check(7, "canopymodel", "median |CHM - R reference| under 0.5 ft (plausible cells)", stats::median(diff_chm) < 0.5, round(stats::median(diff_chm), 3), "< 0.5 ft")
+
+#5. check the smoothed and slope-adjusted variants actually changed things
+#  - smoothing should lower the cell-to-cell variation; /slope should
+#    change at least some cells
+if(fn_check_file(7, "canopymodel", path_chm_smooth, "/smooth:3 CHM")) {
+  v_smooth = terra::values(terra::rast(path_chm_smooth))[ , 1]
+  fn_check(7, "canopymodel", "/smooth:3 lowers cell-to-cell variance", stats::var(v_smooth, na.rm = TRUE) < stats::var(v_chm, na.rm = TRUE), round(stats::var(v_smooth, na.rm = TRUE), 2), paste0("< ", round(stats::var(v_chm, na.rm = TRUE), 2)))
+  }
+if(fn_check_file(7, "canopymodel", path_chm_slope, "/slope CHM")) {
+  v_slope = terra::values(terra::rast(path_chm_slope))[ , 1]
+  fn_check(7, "canopymodel", "/slope changes at least one cell", max(abs(v_slope - v_chm), na.rm = TRUE) > 0, round(max(abs(v_slope - v_chm), na.rm = TRUE), 3), "> 0")
+  }
+
+#6. map the CHM, outlining any cells above the height ceiling in red
+fn_plot_raster_map(r_chm, 1, "Canopy height model (red = above the height ceiling)", highlight_above = height_limit)
+```
+
+# Step 8: Map point density with `returndensity`
+
+`returndensity` writes point density per unit area and the percent of
+returns that are first returns. Multiplying density by cell area and
+summing should give back the tile's point count exactly.
+
+```{r}
+#| label: step-8-returndensity
+
+#1. run returndensity at a 10 ft cell size
+path_returndensity = file.path(dir_run, "returndensity.tif")
+fn_run_tool(8, "returndensity", c(path_las, paste0("/output:", path_returndensity), "/cellsize:10"), "returndensity")
+
+if(fn_check_file(8, "returndensity", path_returndensity, "density raster")) {
+  #2. overview and placement
+  r_rd = terra::rast(path_returndensity)
+  print(fn_raster_overview(r_rd))
+  fn_check_raster_extent(8, "returndensity", r_rd, "density raster")
+  fn_check_raster_crs(8, "returndensity", r_rd, "density raster")
+
+  #3. check density x cell area against the point count, overall and per cell
+  cell_area = prod(terra::res(r_rd))
+  v_density = terra::values(r_rd[[1]])[ , 1]
+  n_implied = sum(v_density, na.rm = TRUE) * cell_area
+  fn_check(8, "returndensity", "density x cell area sums to the point count (within 0.5%)", abs(n_implied - n_points) / n_points < 0.005, round(n_implied), n_points)
+  r_count_ref = terra::rasterize(v_pts, r_rd, fun = "length")
+  v_count_ref = terra::values(r_count_ref)[ , 1]
+  v_count_ref[is.na(v_count_ref)] = 0
+  fn_check(8, "returndensity", "per-cell counts match R exactly", all(abs(v_density * cell_area - v_count_ref) < 0.5), sum(abs(v_density * cell_area - v_count_ref) >= 0.5), "0 mismatched cells")
+
+  #4. check the first-return percentage and the band's unit label
+  #  - the tile's units are US survey feet, so a band labelled per square
+  #    meter is mislabelled unless the tool converted units
+  v_first_pct = terra::values(r_rd[[2]])[ , 1]
+  fn_check(8, "returndensity", "first-return percent within 0-100", all(v_first_pct >= 0 & v_first_pct <= 100, na.rm = TRUE), round(range(v_first_pct, na.rm = TRUE), 2), "0 to 100")
+  fn_check(8, "returndensity", "density band's unit label matches the tile's linear units (feet)", !grepl("m2", names(r_rd)[1]), names(r_rd)[1], "no m2 label on a feet-based tile", severity = "soft")
+  }
+```
+
+# Step 9: Map density by height stratum with `densitymetrics`
+
+`densitymetrics` counts returns in height bands above ground (default
+breaks 0.5, 2, 5, 10, and 20 ft, giving six bands) and writes one raster
+band per stratum. Per cell, the stratum counts should add up to that
+cell's total returns. The top stratum (above 20 ft) should be nearly
+empty on this low-canopy tile.
+
+```{r}
+#| label: step-9-densitymetrics
+
+#1. run densitymetrics with the FUSION2 ground DEM
+dir_dm = file.path(dir_run, "densitymetrics")
+dir.create(dir_dm, showWarnings = FALSE)
+fn_run_tool(9, "densitymetrics", c(path_las, path_ground_dem, paste0("/outdir:", dir_dm), "/output:dm", "/cellsize:10"), "densitymetrics")
+
+#2. overview and placement of the raster
+path_dm_tif = list.files(dir_dm, pattern = "\\.tif$", full.names = TRUE)[1]
+if(fn_check_file(9, "densitymetrics", if(is.na(path_dm_tif)) file.path(dir_dm, "dm_densitymetrics.tif") else path_dm_tif, "stratum raster")) {
+  r_dm = terra::rast(path_dm_tif)
+  print(fn_raster_overview(r_dm))
+  fn_check_raster_extent(9, "densitymetrics", r_dm, "stratum raster")
+  fn_check_raster_crs(9, "densitymetrics", r_dm, "stratum raster")
+  }
+
+#3. check the per-cell CSV table
+#  - newer builds write it only when /output-table is given; the check
+#    is skipped with a note if no CSV appears
+path_dm_csv = list.files(dir_dm, pattern = "\\.csv$", full.names = TRUE)[1]
+if(!is.na(path_dm_csv)) {
+  dt_dm = data.table::fread(path_dm_csv)
+  nms_strata_cnt = grep("^StrataCnt_", names(dt_dm), value = TRUE)
+  stratum_sum = rowSums(dt_dm[ , ..nms_strata_cnt])
+  fn_check(9, "densitymetrics", "per cell, stratum counts add to total returns", all(stratum_sum == dt_dm$TotalReturns), sum(stratum_sum != dt_dm$TotalReturns), "0 mismatched cells")
+  fn_check(9, "densitymetrics", "total returns across cells equals the point count", sum(dt_dm$TotalReturns) == n_points, sum(dt_dm$TotalReturns), n_points)
+
+  #  - the top stratum's count against R's count of points more than 20 ft
+  #    above the FUSION2 ground DEM
+  n_top_expected = sum(height_above_fusion_ground > 20, na.rm = TRUE)
+  n_top_observed = sum(dt_dm[[nms_strata_cnt[length(nms_strata_cnt)]]])
+  fn_check(9, "densitymetrics", "top stratum (> 20 ft) count matches R (within 5 points)", abs(n_top_observed - n_top_expected) <= 5, n_top_observed, n_top_expected)
+  } else {
+  fn_check(9, "densitymetrics", "per-cell CSV table written", FALSE, "none", "one CSV", severity = "soft")
+  }
+```
+
+# Step 10: Compute the full metric grid with `gridmetrics`
+
+`gridmetrics` computes the full elevation and intensity statistic bundle
+per cell, plus height strata (`/strata`, `/strataraster`) and surface
+roughness (`/surfstats`). Script 001 covers the table-export options in
+depth. The checks here focus on placement, per-cell return counts, the
+height ceiling, and agreement between the raster and its CSV table.
+
+```{r}
+#| label: step-10-gridmetrics
+
+#1. run gridmetrics with strata, strata rasters, and surface stats
+dir_gm = file.path(dir_run, "gridmetrics")
+dir.create(dir_gm, showWarnings = FALSE)
+path_gm_table = file.path(dir_gm, "gridmetrics_table.csv")
+fn_run_tool(10, "gridmetrics", c(
+    path_las
+  , path_ground_dem
+  , "/cellsize:10"
+  , paste0("/outdir:", dir_gm)
+  , "/strata:0.5,2,5,10,20"
+  , "/strataraster"
+  , "/surfstats"
+  , paste0("/output-table:", path_gm_table)
+  ), "gridmetrics")
+
+#2. find the raster and table
+#  - older builds ignore /output-table and write their own CSV name, so
+#    either name is accepted here; the soft check records which happened
+path_gm_tif = list.files(dir_gm, pattern = "_gridmetrics\\.tif$", full.names = TRUE)[1]
+path_gm_csv = if(file.exists(path_gm_table)) path_gm_table else list.files(dir_gm, pattern = "\\.csv$", full.names = TRUE)[1]
+fn_check(10, "gridmetrics", "/output-table path honored", file.exists(path_gm_table), if(file.exists(path_gm_table)) "written" else "ignored", "written", severity = "soft")
+
+if(fn_check_file(10, "gridmetrics", if(is.na(path_gm_tif)) file.path(dir_gm, "missing_gridmetrics.tif") else path_gm_tif, "metrics raster")) {
+  #3. overview and placement
+  r_gm = terra::rast(path_gm_tif)
+  dt_gm_overview = fn_raster_overview(r_gm)
+  print(dt_gm_overview[ , .(n_bands = .N, n_all_na = sum(n_na == n_cells))])
+  fn_check_raster_extent(10, "gridmetrics", r_gm, "metrics raster")
+  fn_check_raster_crs(10, "gridmetrics", r_gm, "metrics raster")
+
+  #4. list any band that is empty everywhere
+  #  - surface_area_ratio/roughness may legitimately be empty on this
+  #    sparse-canopy tile (see script 001 Step 5), so they're soft
+  nms_all_na = dt_gm_overview[n_na == n_cells, band]
+  nms_all_na_unexpected = setdiff(nms_all_na, c("surface_area_ratio", "roughness"))
+  fn_check(10, "gridmetrics", "no band is empty in every cell (other than surface stats)", length(nms_all_na_unexpected) == 0, if(length(nms_all_na_unexpected)) paste(nms_all_na_unexpected, collapse = ";") else "none", "none")
+
+  #5. check per-cell return counts against R
+  #  - the raster is compared cell-by-cell in row/column order against a
+  #    reference grid built on the tile's own coordinates, so the count
+  #    check still works even if the raster's coordinates are wrong
+  nms_rcount = grep("^r[0-9]count$", names(r_gm), value = TRUE)
+  v_gm_total = rowSums(terra::values(r_gm[[nms_rcount]]), na.rm = TRUE)
+  r_ref_10 = fn_reference_grid(10)
+  v_ref_10 = terra::values(terra::rasterize(v_pts, r_ref_10, fun = "length"))[ , 1]
+  v_ref_10[is.na(v_ref_10)] = 0
+  same_shape = terra::nrow(r_gm) == terra::nrow(r_ref_10) & terra::ncol(r_gm) == terra::ncol(r_ref_10)
+  fn_check(10, "gridmetrics", "grid has the expected rows x columns for the tile", same_shape, paste(dim(r_gm)[1:2], collapse = "x"), paste(dim(r_ref_10)[1:2], collapse = "x"))
+  if(same_shape) fn_check(10, "gridmetrics", "per-cell return counts match R", all(v_gm_total == v_ref_10), sum(v_gm_total != v_ref_10), "0 mismatched cells")
+
+  #6. apply the height ceiling to elev_max
+  v_gm_max = terra::values(r_gm[["elev_max"]])[ , 1]
+  n_gm_too_tall = sum(v_gm_max > height_limit, na.rm = TRUE)
+  fn_check(10, "gridmetrics", "no elev_max cell exceeds the tallest point above ground", n_gm_too_tall == 0, paste0(n_gm_too_tall, " cells; max ", round(max(v_gm_max, na.rm = TRUE), 2)), paste0("0 cells above ", round(height_limit, 2), " ft"))
+
+  #7. check the CSV table agrees with the raster, cell by cell
+  #  - the table is sorted by row then column to match raster cell order
+  if(!is.na(path_gm_csv) && file.exists(path_gm_csv)) {
+    dt_gm = data.table::fread(path_gm_csv)
+    data.table::setorder(dt_gm, Row, Col)
+    fn_check(10, "gridmetrics", "CSV table has one row per raster cell", nrow(dt_gm) == terra::ncell(r_gm), nrow(dt_gm), terra::ncell(r_gm))
+    if(nrow(dt_gm) == terra::ncell(r_gm)) {
+      v_gm_mean = terra::values(r_gm[["elev_mean"]])[ , 1]
+      same_mean = all(abs(dt_gm$elev_mean - v_gm_mean) < 1e-3 | (is.na(dt_gm$elev_mean) & is.na(v_gm_mean)))
+      fn_check(10, "gridmetrics", "CSV elev_mean matches the raster band", same_mean, sum(!same_mean), "all cells equal")
+      }
+    }
+
+  #8. map elev_max, outlining cells above the height ceiling
+  print(fn_plot_raster_map(r_gm, "elev_max", "gridmetrics elev_max (red = above the height ceiling)", highlight_above = height_limit))
+  }
+```
+
+# Step 11: Summarize the tile and two plots with `cloudmetrics`
+
+`cloudmetrics` writes one row of summary metrics for the whole cloud, or
+one row per polygon with `/shape`. Both are checked against R's counts and
+the height ceiling.
+
+```{r}
+#| label: step-11-cloudmetrics
+
+#1. whole-tile metrics with height strata
+path_cm_tile = file.path(dir_run, "cloudmetrics_tile.csv")
+fn_run_tool(11, "cloudmetrics", c(path_las, paste0("/ground:", path_ground_dem), paste0("/output:", path_cm_tile), "/minht:2", "/strata:0.5,2,5,10,20"), "cloudmetrics tile")
+if(fn_check_file(11, "cloudmetrics", path_cm_tile, "tile metrics CSV")) {
+  dt_cm_tile = data.table::fread(path_cm_tile)
+  print(dt_cm_tile[ , 1:12])
+  fn_check(11, "cloudmetrics", "tile: total points matches the tile", dt_cm_tile$TotalPoints == n_points, dt_cm_tile$TotalPoints, n_points)
+  fn_check(11, "cloudmetrics", "tile: elev_max within the tallest point above ground", dt_cm_tile$elev_max <= height_limit, round(dt_cm_tile$elev_max, 2), paste0("<= ", round(height_limit, 2), " ft"))
+  n_canopy_expected = sum(height_above_fusion_ground > 2, na.rm = TRUE)
+  fn_check(11, "cloudmetrics", "tile: canopy points (> 2 ft) match R (within 1%)", abs(dt_cm_tile$CanopyPoints - n_canopy_expected) <= max(3, 0.01 * n_canopy_expected), dt_cm_tile$CanopyPoints, n_canopy_expected)
+  }
+
+#2. per-plot metrics labelled by plot_id
+path_cm_plots = file.path(dir_run, "cloudmetrics_plots.csv")
+fn_run_tool(11, "cloudmetrics", c(path_las, paste0("/ground:", path_ground_dem), paste0("/output:", path_cm_plots), paste0("/shape:", path_plots_shp), "/field:plot_id"), "cloudmetrics /shape")
+if(fn_check_file(11, "cloudmetrics", path_cm_plots, "per-plot metrics CSV")) {
+  dt_cm_plots = data.table::fread(path_cm_plots)
+  print(dt_cm_plots[ , 1:8])
+  fn_check(11, "cloudmetrics", "/shape: one row per plot, labelled from /field", setequal(dt_cm_plots$Label, names(n_in_plot)), paste(dt_cm_plots$Label, collapse = ","), paste(names(n_in_plot), collapse = ","))
+  for(plot_i in intersect(dt_cm_plots$Label, names(n_in_plot))) {
+    n_cm_i = dt_cm_plots[Label == plot_i, TotalPoints]
+    fn_check(11, "cloudmetrics", paste0("/shape: ", plot_i, " point count within 0.5% of R"), abs(n_cm_i - n_in_plot[[plot_i]]) <= max(3, 0.005 * n_in_plot[[plot_i]]), n_cm_i, n_in_plot[[plot_i]])
+    }
+  }
+```
+
+# Step 12: Compute slope and aspect with `topometrics`
+
+`topometrics` derives slope and aspect from a DEM. It is run twice: on the
+FUSION2 ground DEM from Step 5, and on the external USGS DTM, which has a
+coordinate system attached. The reference slope and aspect come from
+`terra::terrain()`. Edge cells have no full neighborhood, so they are left
+out of the comparison.
+
+```{r}
+#| label: step-12-topometrics
+
+#1. define a helper that runs topometrics on one DEM and compares it with
+#   terra::terrain() on interior cells
+fn_check_topometrics = function(path_dem, path_out, run_label){
+  fn_run_tool(12, "topometrics", c(path_dem, paste0("/output:", path_out)), run_label)
+  if(!fn_check_file(12, "topometrics", path_out, paste0(run_label, " raster"))) return(invisible(NULL))
+  r_dem = terra::rast(path_dem)
+  r_topo = terra::rast(path_out)
+  print(fn_raster_overview(r_topo))
+
+  #  - keep the input DEM's grid and coordinate system
+  same_grid = all(abs(as.vector(terra::ext(r_topo)) - as.vector(terra::ext(r_dem))) < 1e-6) & all(dim(r_topo)[1:2] == dim(r_dem)[1:2])
+  fn_check(12, "topometrics", paste0(run_label, ": output on the input DEM's grid"), same_grid, round(as.vector(terra::ext(r_topo)), 2), round(as.vector(terra::ext(r_dem)), 2))
+  fn_check(12, "topometrics", paste0(run_label, ": keeps the input's coordinate system"), nzchar(terra::crs(r_topo)) == nzchar(terra::crs(r_dem)), if(nzchar(terra::crs(r_topo))) "present" else "none", if(nzchar(terra::crs(r_dem))) "present" else "none", severity = "soft")
+
+  #  - interior cells only
+  interior = terra::rast(r_dem)
+  terra::values(interior) = 1
+  interior[c(1, terra::nrow(r_dem)), ] = NA
+  interior[ , c(1, terra::ncol(r_dem))] = NA
+  keep = !is.na(terra::values(interior)[ , 1])
+
+  #  - slope within 0.5 degrees
+  slope_ref = terra::values(terra::terrain(r_dem, v = "slope", unit = "degrees"))[ , 1]
+  slope_tool = terra::values(r_topo[["slope_degrees"]])[ , 1]
+  diff_slope = abs(slope_tool - slope_ref)[keep]
+  fn_check(12, "topometrics", paste0(run_label, ": interior cells have values"), sum(is.na(slope_tool[keep])) == 0, sum(is.na(slope_tool[keep])), 0)
+  fn_check(12, "topometrics", paste0(run_label, ": median |slope - terra| under 0.5 degrees"), stats::median(diff_slope, na.rm = TRUE) < 0.5, round(stats::median(diff_slope, na.rm = TRUE), 3), "< 0.5")
+
+  #  - aspect compared around the circle, only where the slope is steep
+  #    enough (> 2 degrees) for aspect to be stable
+  #  - terra reports a compass bearing (0 = north, clockwise); the tool may
+  #    instead use the math convention (0 = east, counterclockwise), which
+  #    is converted to a bearing as 90 - aspect. The values are correct if
+  #    either reading matches; the soft check records which one it uses
+  aspect_ref = terra::values(terra::terrain(r_dem, v = "aspect", unit = "degrees"))[ , 1]
+  aspect_tool = terra::values(r_topo[["aspect_degrees"]])[ , 1]
+  fn_angle_diff = function(a, b){
+    d = abs((a - b) %% 360)
+    pmin(d, 360 - d)
+    }
+  keep_aspect = keep & slope_ref > 2
+  diff_compass = stats::median(fn_angle_diff(aspect_tool, aspect_ref)[keep_aspect], na.rm = TRUE)
+  diff_math = stats::median(fn_angle_diff((90 - aspect_tool) %% 360, aspect_ref)[keep_aspect], na.rm = TRUE)
+  fn_check(12, "topometrics", paste0(run_label, ": aspect matches terra (compass or math convention) within 5 degrees"), min(diff_compass, diff_math) < 5, paste0("compass ", round(diff_compass, 2), "; math ", round(diff_math, 2)), "< 5 under one convention")
+  fn_check(12, "topometrics", paste0(run_label, ": aspect reported as a compass bearing (0 = north, clockwise)"), diff_compass < 5, if(diff_compass < 5) "compass bearing" else if(diff_math < 5) "math convention (0 = east, counterclockwise)" else "neither", "compass bearing", severity = "soft")
+
+  #  - plot tool slope (x) against the terra reference (y)
+  dt_cmp = data.table::data.table(topometrics = slope_tool[keep], terra_reference = slope_ref[keep])
+  print(
+    ggplot2::ggplot(dt_cmp, ggplot2::aes(x = topometrics, y = terra_reference)) +
+      ggplot2::geom_abline(slope = 1, intercept = 0, colour = "grey50") +
+      ggplot2::geom_point(alpha = 0.3, size = 0.6) +
+      ggplot2::coord_equal() +
+      ggplot2::labs(title = paste0("Slope: ", run_label), x = "topometrics slope (degrees)", y = "terra::terrain slope (degrees)") +
+      ggplot2::theme_minimal(base_size = 11)
+    )
+  invisible(r_topo)
+  }
+
+#2. run on the FUSION2 ground DEM and the external USGS DTM
+fn_check_topometrics(path_ground_dem, file.path(dir_run, "topometrics_ground.tif"), "topometrics ground DEM")
+fn_check_topometrics(path_dtm_external, file.path(dir_run, "topometrics_external_dtm.tif"), "topometrics external DTM")
+```
+
+# Step 13: Compute surface roughness with `gridsurfacestats`
+
+`gridsurfacestats` derives surface area ratio and roughness from a surface
+raster. Given a second surface with `/reference`, it also computes the
+cut/fill volume between them. It runs on the canopy height model with the
+smoothed model as the reference, so `volume_diff` should equal the
+per-cell height difference times cell area.
+
+```{r}
+#| label: step-13-gridsurfacestats
+
+#1. run gridsurfacestats with a reference surface
+path_surf = file.path(dir_run, "gridsurfacestats.tif")
+fn_run_tool(13, "gridsurfacestats", c(path_chm, paste0("/output:", path_surf), paste0("/reference:", path_chm_smooth)), "gridsurfacestats")
+
+if(fn_check_file(13, "gridsurfacestats", path_surf, "surface stats raster")) {
+  #2. overview and placement
+  r_surf = terra::rast(path_surf)
+  print(fn_raster_overview(r_surf))
+  fn_check_raster_extent(13, "gridsurfacestats", r_surf, "surface stats raster")
+  fn_check_raster_crs(13, "gridsurfacestats", r_surf, "surface stats raster")
+
+  #3. check value ranges that hold by definition
+  #  - a surface's 3D area can never be less than its flat area, so the
+  #    ratio is always >= 1
+  v_sar = terra::values(r_surf[["surface_area_ratio"]])[ , 1]
+  v_rough = terra::values(r_surf[["roughness"]])[ , 1]
+  fn_check(13, "gridsurfacestats", "surface_area_ratio >= 1 everywhere", all(v_sar >= 1 - 1e-9, na.rm = TRUE), round(min(v_sar, na.rm = TRUE), 4), ">= 1")
+  fn_check(13, "gridsurfacestats", "roughness >= 0 everywhere", all(v_rough >= 0, na.rm = TRUE), round(min(v_rough, na.rm = TRUE), 4), ">= 0")
+
+  #4. check volume_diff against the per-cell height difference
+  #  - which input is subtracted from which isn't documented, so either
+  #    sign is accepted
+  #  - the hard check accepts the difference with or without the cell-area
+  #    factor; the soft check records whether the band is a true volume
+  #    (height difference x cell area), as its name says
+  if("volume_diff" %in% names(r_surf)) {
+    v_vol = terra::values(r_surf[["volume_diff"]])[ , 1]
+    v_height_diff = terra::values(r_chm)[ , 1] - terra::values(terra::rast(path_chm_smooth))[ , 1]
+    cell_area_surf = prod(terra::res(r_chm))
+    fn_matches = function(expected){
+      all(abs(v_vol - expected) < 1e-3, na.rm = TRUE) | all(abs(v_vol + expected) < 1e-3, na.rm = TRUE)
+      }
+    is_volume = fn_matches(v_height_diff * cell_area_surf)
+    is_depth = fn_matches(v_height_diff)
+    fn_check(13, "gridsurfacestats", "volume_diff tracks the surface - reference difference", is_volume | is_depth, if(is_volume) "height difference x cell area" else if(is_depth) "height difference only" else "neither", "one of the two")
+    fn_check(13, "gridsurfacestats", "volume_diff includes cell area (a true volume)", is_volume, if(is_volume) "volume" else if(is_depth) "height difference only (no cell area)" else "neither", "height difference x cell area", severity = "soft")
+    } else {
+    fn_check(13, "gridsurfacestats", "volume_diff band written with /reference", FALSE, "absent", "present")
+    }
+  }
+```
+
+# Step 14: Find tree tops with `canopymaxima`
+
+`canopymaxima` finds local height peaks on the canopy height model. Each
+reported tree top should sit inside the tile, stand at least `/minht`
+tall, match the CHM's height at that location, and stay under the height
+ceiling.
+
+```{r}
+#| label: step-14-canopymaxima
+
+#1. run canopymaxima on the plain CHM
+path_tops = file.path(dir_run, "tree_tops.csv")
+fn_run_tool(14, "canopymaxima", c(path_chm, paste0("/output:", path_tops), "/minht:2"), "canopymaxima")
+
+if(fn_check_file(14, "canopymaxima", path_tops, "tree tops CSV")) {
+  dt_tops = data.table::fread(path_tops)
+  print(head(dt_tops))
+  fn_check(14, "canopymaxima", "at least one tree top found", nrow(dt_tops) > 0, nrow(dt_tops), "> 0")
+
+  #2. location, minimum height, and height ceiling
+  inside = dt_tops$X >= ext_tile[["xmin"]] - cellsize_chm & dt_tops$X <= ext_tile[["xmax"]] + cellsize_chm & dt_tops$Y >= ext_tile[["ymin"]] - cellsize_chm & dt_tops$Y <= ext_tile[["ymax"]] + cellsize_chm
+  fn_check(14, "canopymaxima", "every tree top inside the tile", all(inside), sum(!inside), "0 outside")
+  fn_check(14, "canopymaxima", "every tree top at least /minht (2 ft)", all(dt_tops$Height >= 2), round(min(dt_tops$Height), 2), ">= 2")
+  n_tops_too_tall = sum(dt_tops$Height > height_limit)
+  fn_check(14, "canopymaxima", "no tree top exceeds the tallest point above ground", n_tops_too_tall == 0, paste0(n_tops_too_tall, " tops; max ", round(max(dt_tops$Height), 2)), paste0("0 above ", round(height_limit, 2), " ft"))
+
+  #3. check the CSV writes coordinates at full precision
+  #  - a value like 2.05097e+06 keeps only 6 significant digits, which
+  #    moves a tree top by up to 5 ft on this tile's coordinates
+  lines_tops = readLines(path_tops)[-1]
+  n_sci = sum(grepl("[0-9]e[+-][0-9]", lines_tops))
+  fn_check(14, "canopymaxima", "X/Y written without scientific-notation rounding", n_sci == 0, paste0(n_sci, " rows, e.g. X = ", strsplit(lines_tops[1], ",")[[1]][2]), "0 rows")
+
+  #4. each top's height should equal the CHM cell it sits in
+  #  - a mismatch usually means the reported X/Y lost precision, so the
+  #    top points at the wrong cell
+  chm_at_top = terra::extract(r_chm, cbind(dt_tops$X, dt_tops$Y))[ , 1]
+  n_mismatch = sum(abs(chm_at_top - dt_tops$Height) > 0.01 | is.na(chm_at_top))
+  fn_check(14, "canopymaxima", "each top's height equals the CHM at its X/Y", n_mismatch == 0, n_mismatch, "0 mismatched tops")
+  }
+```
+
+# Step 15: Segment tree crowns with `treeseg`
+
+`treeseg` grows a crown region around each peak on the CHM. It writes a
+segment raster and a per-crown table. The table's pixel counts and maximum
+heights should match what R reads from the segment raster and the CHM.
+
+```{r}
+#| label: step-15-treeseg
+
+#1. run treeseg on the plain CHM
+path_crowns_tif = file.path(dir_run, "crown_segments.tif")
+path_crowns_csv = file.path(dir_run, "crown_summary.csv")
+fn_run_tool(15, "treeseg", c(path_chm, paste0("/output-raster:", path_crowns_tif), paste0("/output-table:", path_crowns_csv), "/minht:2"), "treeseg")
+
+if(fn_check_file(15, "treeseg", path_crowns_tif, "segment raster") & fn_check_file(15, "treeseg", path_crowns_csv, "crown table")) {
+  r_crowns = terra::rast(path_crowns_tif)
+  dt_crowns = data.table::fread(path_crowns_csv)
+  print(head(dt_crowns))
+  fn_check_raster_extent(15, "treeseg", r_crowns, "segment raster")
+  fn_check_raster_crs(15, "treeseg", r_crowns, "segment raster")
+
+  #2. rebuild the per-crown pixel count and max height from the rasters
+  dt_crown_ref = data.table::data.table(TreeID = terra::values(r_crowns)[ , 1], chm = terra::values(r_chm)[ , 1])
+  dt_crown_ref = dt_crown_ref[!is.na(TreeID), .(PixelCount_ref = .N, MaxHeight_ref = max(chm, na.rm = TRUE)), by = TreeID]
+  dt_crown_cmp = merge(dt_crowns, dt_crown_ref, by = "TreeID", all = TRUE)
+
+  #3. compare the table with the rebuilt values
+  fn_check(15, "treeseg", "same crowns in the table and the raster", nrow(dt_crown_cmp) == nrow(dt_crowns) & nrow(dt_crown_cmp) == nrow(dt_crown_ref), nrow(dt_crowns), nrow(dt_crown_ref))
+  fn_check(15, "treeseg", "PixelCount matches the segment raster", all(dt_crown_cmp$PixelCount == dt_crown_cmp$PixelCount_ref, na.rm = FALSE), sum(dt_crown_cmp$PixelCount != dt_crown_cmp$PixelCount_ref, na.rm = TRUE), "0 mismatched crowns")
+  fn_check(15, "treeseg", "MaxHeight matches the CHM within each crown", all(abs(dt_crown_cmp$MaxHeight - dt_crown_cmp$MaxHeight_ref) < 0.01), sum(abs(dt_crown_cmp$MaxHeight - dt_crown_cmp$MaxHeight_ref) >= 0.01, na.rm = TRUE), "0 mismatched crowns")
+  n_crowns_too_tall = sum(dt_crowns$MaxHeight > height_limit)
+  fn_check(15, "treeseg", "no crown exceeds the tallest point above ground", n_crowns_too_tall == 0, paste0(n_crowns_too_tall, " crowns; max ", round(max(dt_crowns$MaxHeight), 2)), paste0("0 above ", round(height_limit, 2), " ft"))
+
+  #4. crown area should be pixel count x cell area; the column is labelled
+  #   m2, which is only right if the tool converted from the tile's feet
+  cell_area_chm = prod(terra::res(r_chm))
+  fn_check(15, "treeseg", "crown area = pixel count x cell area", all(abs(dt_crowns$CrownArea_m2 - dt_crowns$PixelCount * cell_area_chm) < 1), sum(abs(dt_crowns$CrownArea_m2 - dt_crowns$PixelCount * cell_area_chm) >= 1), "0 mismatched crowns")
+  fn_check(15, "treeseg", "crown area column's unit label matches the tile's units (feet)", !any(grepl("_m2$", names(dt_crowns))), grep("Area", names(dt_crowns), value = TRUE), "no m2 label on a feet-based tile", severity = "soft")
+
+  #5. map the crowns
+  print(fn_plot_raster_map(r_crowns, 1, "treeseg crown segments (IDs)"))
+  }
+```
+
+# Step 16: Chain tools per tile with `pipeline`
+
+`pipeline` splits the input into tiles with a buffer, runs a chain of
+tools on each tile, and mosaics the results. It needs an explicit
+`/extent` (script 003 Step 2 explains why). The chain here is ground DEM,
+then canopy model, then tree tops, on four 100 x 100 ft tiles. The
+mosaicked canopy model should match the single-run model from Step 7
+wherever both are plausible.
+
+```{r}
+#| label: step-16-pipeline
+
+#1. run a three-stage chain over four tiles
+dir_pl = file.path(dir_run, "pipeline")
+arg_extent_tile = paste0("/extent:", paste(ext_tile[c("xmin", "ymin", "xmax", "ymax")], collapse = ","))
+fn_run_tool(16, "pipeline", c(
+    "/pipeline:groundfilter,canopymodel,canopymaxima"
+  , paste0("/input:", path_las)
+  , paste0("/output:", dir_pl)
+  , arg_extent_tile
+  , "/tilesize:100,100"
+  , "/buffer:20"
+  , "/cellsize:3"
+  , "/minht:2"
+  , "/merge"
+  ), "pipeline")
+
+#2. check the run state table: every tile x stage should have finished
+path_pl_state = file.path(dir_pl, "_processing", "pipeline_state.csv")
+if(fn_check_file(16, "pipeline", path_pl_state, "run state table")) {
+  dt_pl_state = data.table::fread(path_pl_state, colClasses = "character")
+  print(dt_pl_state[ , .N, by = .(stage, status)])
+  fn_check(16, "pipeline", "no tile x stage failed", !any(grepl("fail", dt_pl_state$status, ignore.case = TRUE)), paste(unique(dt_pl_state$status), collapse = ","), "no failed status")
+  fn_check(16, "pipeline", "four tiles processed", data.table::uniqueN(dt_pl_state$tile) == 4, data.table::uniqueN(dt_pl_state$tile), 4)
+  }
+
+#3. compare the mosaicked CHM with Step 7's single-run CHM
+#  - the merged GeoTIFF is preferred; the VRT mosaic is used if /merge
+#    produced nothing
+paths_pl_chm = list.files(dir_pl, pattern = "canopymodel.*\\.(tif|vrt)$", full.names = TRUE)
+paths_pl_chm = paths_pl_chm[order(!grepl("\\.tif$", paths_pl_chm))]
+if(fn_check(16, "pipeline", "mosaicked canopy model written", length(paths_pl_chm) > 0, if(length(paths_pl_chm)) basename(paths_pl_chm[1]) else "none", "a canopymodel .tif or .vrt")) {
+  r_pl_chm = terra::rast(paths_pl_chm[1])
+  fn_check_raster_extent(16, "pipeline", r_pl_chm, "mosaicked CHM")
+  r_pl_chm_aligned = try(terra::resample(r_pl_chm, r_chm, method = "near"), silent = TRUE)
+  if(!inherits(r_pl_chm_aligned, "try-error")) {
+    v_pl = terra::values(r_pl_chm_aligned)[ , 1]
+    keep_pl = !is.na(v_pl) & !is.na(v_chm) & v_chm <= height_limit & v_pl <= height_limit
+    diff_pl = abs(v_pl[keep_pl] - v_chm[keep_pl])
+    fn_check(16, "pipeline", "mosaicked CHM matches single-run CHM (median diff < 0.5 ft)", length(diff_pl) > 0 && stats::median(diff_pl) < 0.5, if(length(diff_pl)) round(stats::median(diff_pl), 3) else "no overlapping cells", "< 0.5 ft")
+    n_pl_too_tall = sum(terra::values(r_pl_chm)[ , 1] > height_limit, na.rm = TRUE)
+    fn_check(16, "pipeline", "no mosaicked CHM cell exceeds the tallest point above ground", n_pl_too_tall == 0, n_pl_too_tall, 0)
+    } else {
+    fn_check(16, "pipeline", "mosaicked CHM can be aligned with the single-run CHM", FALSE, "resample failed", "aligned")
+    }
+  }
+
+#4. check tree tops were concatenated across tiles without duplicates at
+#   tile seams
+#  - a duplicate is the same X, Y, and height reported twice; matching on
+#    X and Y alone would also flag distinct trees whose coordinates were
+#    rounded to the same value (see Step 14)
+paths_pl_tops = list.files(dir_pl, pattern = "canopymaxima.*\\.csv$", full.names = TRUE)
+if(fn_check(16, "pipeline", "combined tree tops table written", length(paths_pl_tops) > 0, length(paths_pl_tops), ">= 1")) {
+  dt_pl_tops = data.table::fread(paths_pl_tops[1])
+  n_dup_tops = sum(duplicated(dt_pl_tops[ , .(X, Y, Height)]))
+  fn_check(16, "pipeline", "no duplicate tree tops across tile seams", n_dup_tops == 0, n_dup_tops, 0)
+  }
+```
+
+# Step 17: Gather every check into one table
+
+This step collects every check from Steps 1-16, prints the failures, and
+saves the full log as a versioned CSV. The chart shows each tool's pass,
+warn, and fail counts at a glance. Each failed `hard` check is a candidate
+for a unit test in `fusion_update/tests/cpp` that reproduces it before the
+fix.
+
+```{r}
+#| label: step-17-summary
+
+#1. assemble the log and label each result
+dt_checks = data.table::rbindlist(env_checks$rows)
+dt_checks[ , result := data.table::fifelse(passed, "pass", data.table::fifelse(severity == "hard", "fail", "warn"))]
+
+#2. print a per-tool tally and every non-passing check
+dt_tally = data.table::dcast(dt_checks[ , .N, by = .(tool, result)], tool ~ result, value.var = "N", fill = 0)
+print(dt_tally)
+print(dt_checks[result != "pass", .(step, tool, check, observed, expected, result)])
+
+#3. save the log, stamped with the tool build it tested
+dt_checks[ , build_modified := dt_build$modified[match(tool, dt_build$tool)]]
+path_check_log = RForInvt::file_version(
+    file.path(dir_tables, "all_tools_check_log.csv")
+  , increment = TRUE
+  , note = "per-tool output checks from 005_example_all_tools.qmd"
+  )
+data.table::fwrite(dt_checks, path_check_log)
+cat("Check log written to:", path_check_log, "\n")
+
+#4. chart pass/warn/fail counts per tool, in the order the tools ran
+dt_plot = dt_checks[ , .N, by = .(tool, result)]
+dt_plot[ , tool := factor(tool, levels = rev(unique(dt_checks$tool)))]
+dt_plot[ , result := factor(result, levels = c("fail", "warn", "pass"))]
+ggplot2::ggplot(dt_plot, ggplot2::aes(x = N, y = tool, fill = result)) +
+  ggplot2::geom_col(width = 0.7) +
+  ggplot2::scale_fill_manual(values = c(fail = "#C0392B", warn = "#E0A030", pass = "#5B8C5A")) +
+  ggplot2::labs(title = "Output checks per tool", x = "Number of checks", y = NULL, fill = NULL) +
+  ggplot2::theme_minimal(base_size = 11)
+```
+
+# Session Info
+
+```{r}
+#| label: session-info
+
+sessionInfo()
+```

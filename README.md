@@ -12,9 +12,11 @@ tool's source history.
 
 ## Objectives
 
-1. Demonstrate FUSION2 command-line tools (`gridmetrics`, `clipdata`,
-   `groundfilter`, `canopymodel`, `catalog`, `pipeline`) against real
-   forestry lidar and inventory data.
+1. Demonstrate FUSION2 command-line tools against real forestry lidar and
+   inventory data. `R/analysis/005_example_all_tools.qmd` runs all 15
+   tools on the example lidar tile and checks every output against an
+   independent calculation in R, writing a pass/warn/fail log to
+   `output/tables/all_tools_check_log.csv/`.
 2. Provide small, ready-to-run example datasets so a new user can validate
    a FUSION2 build without sourcing their own data first.
 
