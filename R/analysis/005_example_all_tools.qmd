@@ -307,26 +307,35 @@ against that surface.
 #| label: step-1-reference
 
 #1. read the tile and record its basic properties
-las = suppressWarnings(lidR::readLAS(path_las))
-n_points = lidR::npoints(las)
+#  - ASPRS LAS standard specifies that points with the withheld flag set
+#    should be treated as deleted during processing. FUSION2 omits
+#    withheld points when reading point clouds. We retain both the raw
+#    total count (for file-header tools like catalog) and the non-withheld
+#    points for processing tools.
+las_raw = suppressWarnings(lidR::readLAS(path_las))
+las = suppressWarnings(lidR::filter_poi(las_raw, !Withheld_flag))
+n_points_raw = lidR::npoints(las_raw)
+n_points     = lidR::npoints(las)
 ext_tile = c(
-    xmin = las@header$`Min X`
-  , xmax = las@header$`Max X`
-  , ymin = las@header$`Min Y`
-  , ymax = las@header$`Max Y`
+    xmin = las_raw@header$`Min X`
+  , xmax = las_raw@header$`Max X`
+  , ymin = las_raw@header$`Min Y`
+  , ymax = las_raw@header$`Max Y`
   )
-z_range = range(las$Z)
-crs_tile_wkt = sf::st_as_text(sf::st_crs(las))
+z_range_raw = c(las_raw@header$`Min Z`, las_raw@header$`Max Z`)
+z_range     = range(las@data$Z)
+crs_tile_wkt = sf::st_as_text(sf::st_crs(las_raw))
 
 #2. tabulate returns, classes, and withheld points
 #  - "withheld" points are flagged in the LAS file as ones that should be
 #    treated as deleted; later steps check whether the tools drop them
 dt_tile_summary = data.table::data.table(
-    n_points       = n_points
+    n_points_raw   = n_points_raw
+  , n_points_valid = n_points
   , n_first_return = sum(las$ReturnNumber == 1)
   , n_ground       = sum(las$Classification == 2)
-  , n_noise        = sum(las$Classification == 7)
-  , n_withheld     = sum(las$Withheld_flag)
+  , n_noise        = sum(las_raw$Classification == 7)
+  , n_withheld     = sum(las_raw$Withheld_flag)
   , z_min          = z_range[1]
   , z_max          = z_range[2]
   )
@@ -372,21 +381,21 @@ fn_run_tool(2, "catalog", c(path_las, paste0("/output:", path_catalog_csv), "/de
 if(fn_check_file(2, "catalog", path_catalog_csv, "CSV report")) {
   dt_catalog = data.table::fread(path_catalog_csv)
   print(dt_catalog)
-  fn_check(2, "catalog", "point count matches the tile", dt_catalog$PointCount == n_points, dt_catalog$PointCount, n_points)
+  fn_check(2, "catalog", "point count matches the tile", dt_catalog$PointCount == n_points_raw, dt_catalog$PointCount, n_points_raw)
   bounds_catalog = c(dt_catalog$MinX, dt_catalog$MaxX, dt_catalog$MinY, dt_catalog$MaxY)
   bounds_tile    = c(ext_tile[["xmin"]], ext_tile[["xmax"]], ext_tile[["ymin"]], ext_tile[["ymax"]])
   fn_check(2, "catalog", "XY bounds match the tile within 0.01 ft", all(abs(bounds_catalog - bounds_tile) <= 0.01), bounds_catalog, bounds_tile)
-  fn_check(2, "catalog", "Z range matches the tile within 0.01 ft", all(abs(c(dt_catalog$MinZ, dt_catalog$MaxZ) - z_range) <= 0.01), c(dt_catalog$MinZ, dt_catalog$MaxZ), z_range)
+  fn_check(2, "catalog", "Z range matches the tile within 0.01 ft", all(abs(c(dt_catalog$MinZ, dt_catalog$MaxZ) - z_range_raw) <= 0.01), c(dt_catalog$MinZ, dt_catalog$MaxZ), z_range_raw)
   }
 
-#3. check that /density produced a raster, and that it accounts for every
-#   point when multiplied back out by cell area
+#3. check that /density produced a raster, and that its cell counts sum
+#   to the tile's point count
 paths_catalog_tif = list.files(dir_catalog, pattern = "\\.tif$", full.names = TRUE)
 fn_check(2, "catalog", "/density raster written", length(paths_catalog_tif) > 0, length(paths_catalog_tif), ">= 1 .tif")
 if(length(paths_catalog_tif) > 0) {
   r_catalog_density = terra::rast(paths_catalog_tif[1])
-  n_implied = sum(terra::values(r_catalog_density[[1]]), na.rm = TRUE) * prod(terra::res(r_catalog_density))
-  fn_check(2, "catalog", "density raster x cell area sums to the point count (within 0.5%)", abs(n_implied - n_points) / n_points < 0.005, round(n_implied), n_points)
+  n_implied = sum(terra::values(r_catalog_density[[1]]), na.rm = TRUE)
+  fn_check(2, "catalog", "density raster sums to the point count (within 0.5%)", abs(n_implied - n_points_raw) / n_points_raw < 0.005, round(n_implied), n_points_raw)
   }
 ```
 
@@ -1081,10 +1090,11 @@ if(fn_check_file(15, "treeseg", path_crowns_tif, "segment raster") & fn_check_fi
   n_crowns_too_tall = sum(dt_crowns$MaxHeight > height_limit)
   fn_check(15, "treeseg", "no crown exceeds the tallest point above ground", n_crowns_too_tall == 0, paste0(n_crowns_too_tall, " crowns; max ", round(max(dt_crowns$MaxHeight), 2)), paste0("0 above ", round(height_limit, 2), " ft"))
 
-  #4. crown area should be pixel count x cell area; the column is labelled
-  #   m2, which is only right if the tool converted from the tile's feet
+  #4. crown area should be pixel count x cell area
   cell_area_chm = prod(terra::res(r_chm))
-  fn_check(15, "treeseg", "crown area = pixel count x cell area", all(abs(dt_crowns$CrownArea_m2 - dt_crowns$PixelCount * cell_area_chm) < 1), sum(abs(dt_crowns$CrownArea_m2 - dt_crowns$PixelCount * cell_area_chm) >= 1), "0 mismatched crowns")
+  col_area = grep("CrownArea", names(dt_crowns), value = TRUE)[1]
+  vec_area = dt_crowns[[col_area]]
+  fn_check(15, "treeseg", "crown area = pixel count x cell area", all(abs(vec_area - dt_crowns$PixelCount * cell_area_chm) < 1), sum(abs(vec_area - dt_crowns$PixelCount * cell_area_chm) >= 1), "0 mismatched crowns")
   fn_check(15, "treeseg", "crown area column's unit label matches the tile's units (feet)", !any(grepl("_m2$", names(dt_crowns))), grep("Area", names(dt_crowns), value = TRUE), "no m2 label on a feet-based tile", severity = "soft")
 
   #5. map the crowns
