@@ -1,0 +1,1423 @@
+---
+title: "FUSION2 All-Tools Run: Visual Review"
+author: "Jacob Strunk"
+date: today
+format:
+  html:
+    embed-resources: true
+    toc: true
+    toc-depth: 2
+    toc-location: left
+    code-fold: true
+    code-summary: "Show code"
+    fig-width: 9
+    fig-height: 5
+execute:
+  echo: true
+  warning: false
+  message: false
+params:
+  dir_run: ""
+  path_check_log: ""
+---
+
+<!--
+Companion report to 005_example_all_tools.qmd. 005 runs every FUSION2 tool
+on the example tile and checks each output against R. This file runs no
+tools: it reads one finished 005 run folder and its check log, and draws
+each tool's output so a person can inspect it.
+
+Unlike the other scripts in this folder, this file is meant to be rendered.
+Render it into docs/ from the project root:
+
+  quarto render R/analysis/005_example_all_tools_REPORT.qmd --output-dir ../../docs
+
+By default it reads the newest run folder and the check log written by
+that same run. To review an older run, set both parameters, for example:
+
+  quarto render R/analysis/005_example_all_tools_REPORT.qmd --output-dir ../../docs \
+    -P dir_run:data/derived/all_tools_example/run/run_VS010_20260925191115 \
+    -P path_check_log:output/tables/all_tools_check_log.csv/all_tools_check_log_VS009_20260925191200.csv
+-->
+
+# How to read this report
+
+Each section below covers one FUSION2 tool, in the order 005 ran them. A
+section has four parts:
+
+1. **Tool and options** -- the command 005 ran, with file paths shortened.
+2. **What success looks like** -- what to look for in the figure if the
+   tool worked.
+3. **Automated checks** -- every check 005 recorded for that tool, read
+   from the run's check log. A check marked `hard` means the output is
+   wrong or missing if it fails. `soft` means the output works but
+   something about it deserves a look.
+4. **Figures** -- the tool's output, drawn directly from the files it
+   wrote.
+
+The checks and the figures answer different questions. The checks confirm
+counts and values against an independent calculation in R. The figures
+show patterns a count can miss, such as striping, seams between tiles, or
+tree tops that sit off their crown peaks.
+
+Maps are drawn in feet from the tile's lower-left corner rather than in
+the tile's projected coordinates, so the axis labels stay short. Side-view
+figures show a 6 ft wide strip running west to east through the middle of
+the tile. On every map, dark grey cells hold no value.
+
+```{r}
+#| label: root-dir
+#| include: false
+
+knitr::opts_knit$set(root.dir = "../..")
+```
+
+```{r}
+#| label: setup
+#| include: false
+
+#1. load packages
+#  - lidR also defines a crs() function, so every terra call below is
+#    written as terra::fn() to avoid picking up the wrong one
+library(data.table)
+library(ggplot2)
+
+options(scipen = 10E6)
+
+#2. set the folders 005 writes into
+dir_runs_root  = file.path("data", "derived", "all_tools_example", "run")
+dir_check_logs = file.path("output", "tables", "all_tools_check_log.csv")
+dir_lidar_raw  = file.path("data", "raw", "lidar")
+
+#3. set the chart colors
+#  - one blue ramp for magnitudes, a blue-grey-red pair for differences
+#    around zero, and up to three contrasting overlay colors
+cols_seq = c("#cde2fb", "#86b6ef", "#3987e5", "#256abf", "#104281", "#0d366b")
+col_div_low  = "#2a78d6"
+col_div_mid  = "#f0efec"
+col_div_high = "#e34948"
+col_blue   = "#2a78d6"
+col_orange = "#eb6834"
+col_aqua   = "#1baf7a"
+col_points = "#b9b8b2"
+col_na     = "#5f5e5a"
+```
+
+```{r}
+#| label: helper-functions
+#| include: false
+
+#1. define a helper that pulls the timestamp out of a versioned file or
+#   folder name (the trailing _YYYYMMDDHHMMSS)
+fn_name_time = function(path){
+  stamp_i = regmatches(basename(path), regexpr("[0-9]{14}", basename(path)))
+  as.POSIXct(stamp_i, format = "%Y%m%d%H%M%S")
+  }
+
+#2. define the shared chart theme: light grid, bold titles
+fn_theme = function(){
+  ggplot2::theme_minimal(base_size = 11) +
+    ggplot2::theme(
+        panel.grid.minor = ggplot2::element_blank()
+      , panel.grid.major = ggplot2::element_line(colour = "#e6e5e0", linewidth = 0.3)
+      , plot.title = ggplot2::element_text(face = "bold", size = 12)
+      , plot.title.position = "plot"
+      , strip.text = ggplot2::element_text(face = "bold")
+      )
+  }
+
+#3. define a helper that turns one raster band into a table of cells, in
+#   feet from a chosen lower-left corner (the tile's corner by default)
+fn_df_raster = function(r, band = 1, x_origin = x0, y_origin = y0){
+  df_r = as.data.frame(r[[band]], xy = TRUE, na.rm = FALSE)
+  names(df_r) = c("x", "y", "value")
+  data.table::setDT(df_r)
+  df_r[ , x := x - x_origin]
+  df_r[ , y := y - y_origin]
+  df_r
+  }
+
+#4. define a helper that maps a table of cells
+#  - "seq" uses the blue ramp for magnitudes; "div" centers a blue-grey-red
+#    scale on zero for differences
+fn_map = function(df_r, title, fill_label, scale = "seq", limits = NULL){
+  p = ggplot2::ggplot(df_r, ggplot2::aes(x = x, y = y, fill = value)) +
+    ggplot2::geom_raster() +
+    ggplot2::coord_equal(expand = FALSE) +
+    ggplot2::labs(title = title, x = "feet east of corner", y = "feet north of corner", fill = fill_label) +
+    fn_theme()
+  if(scale == "seq") {
+    p = p + ggplot2::scale_fill_gradientn(colours = cols_seq, na.value = col_na, limits = limits)
+    }
+  if(scale == "div") {
+    lim_i = max(abs(df_r$value), na.rm = TRUE)
+    if(!is.finite(lim_i) || lim_i == 0) lim_i = 1
+    p = p + ggplot2::scale_fill_gradient2(low = col_div_low, mid = col_div_mid, high = col_div_high, midpoint = 0, limits = c(-lim_i, lim_i), na.value = col_na)
+    }
+  p
+  }
+
+#5. define a helper that reads a LAS/LAZ file into a table in feet from
+#   the tile corner, dropping withheld points the way FUSION2 does
+fn_las_dt = function(path){
+  if(!file.exists(path)) stop("Point file not found: ", path)
+  las_i = suppressWarnings(lidR::readLAS(path))
+  dt_i = data.table::data.table(
+      x   = las_i$X - x0
+    , y   = las_i$Y - y0
+    , z   = las_i$Z
+    , cls = las_i$Classification
+    , ret = las_i$ReturnNumber
+    , withheld = las_i$Withheld_flag
+    )
+  dt_i[withheld == FALSE]
+  }
+
+#6. define a helper that keeps only points in the west-east side-view strip
+fn_strip = function(dt_pts){
+  dt_pts[abs(y - strip_y) <= strip_half_width]
+  }
+
+#7. define a helper that reads a raster's values along the strip's center
+#   line, for drawing a surface as a line over the side view
+fn_profile = function(r, band = 1){
+  x_line = seq(0, tile_width, by = 0.5)
+  v_line = terra::extract(r[[band]], cbind(x_line + x0, strip_y + y0), method = "bilinear")[ , 1]
+  data.table::data.table(x = x_line, value = v_line)
+  }
+
+#8. define a helper that looks up a ground raster's elevation under points
+fn_ground_under = function(r_ground, dt_pts){
+  terra::extract(r_ground, cbind(dt_pts$x + x0, dt_pts$y + y0), method = "bilinear")[ , 1]
+  }
+
+#9. define a helper that prints one tool's checks from the check log as a
+#   table, with the result spelled out so it never relies on color alone
+fn_checks = function(tool_in){
+  dt_i = dt_checks[tool == tool_in, .(check, severity, observed, expected, result)]
+  dt_i[ , result := data.table::fcase(
+      result == "pass", "PASS"
+    , result == "warn", "WARN"
+    , result == "fail", "FAIL"
+    )]
+  knitr::kable(dt_i, col.names = c("Check", "Severity", "Observed", "Expected", "Result"))
+  }
+
+#10. define a helper that summarizes one tool's checks in a sentence
+fn_check_line = function(tool_in){
+  dt_i = dt_checks[tool == tool_in]
+  sprintf(
+      "%d checks: %d passed, %d warnings, %d failed."
+    , nrow(dt_i), sum(dt_i$result == "pass"), sum(dt_i$result == "warn"), sum(dt_i$result == "fail")
+    )
+  }
+
+#11. define a helper that converts a raster of region IDs into outline
+#    paths, for drawing crown boundaries over a map
+fn_outline_paths = function(r_ids){
+  v_poly = terra::as.polygons(r_ids)
+  v_line = terra::as.lines(v_poly)
+  dt_geom = data.table::as.data.table(terra::geom(v_line))
+  dt_geom[ , x := x - x0]
+  dt_geom[ , y := y - y0]
+  dt_geom[ , path_id := paste(geom, part)]
+  dt_geom
+  }
+
+#12. define a helper that picks a round contour interval giving about ten
+#    contour levels across a surface's elevation range
+fn_contour_step = function(values){
+  breaks_i = pretty(range(values, na.rm = TRUE), n = 10)
+  breaks_i[2] - breaks_i[1]
+  }
+```
+
+# Run under review
+
+```{r}
+#| label: locate-run
+#| echo: false
+
+#1. pick the run folder: the parameter if given, otherwise the newest
+paths_runs = list.dirs(dir_runs_root, recursive = FALSE)
+paths_runs = paths_runs[grepl("^run_VS[0-9]+_[0-9]{14}$", basename(paths_runs))]
+if(length(paths_runs) == 0) stop("No 005 run folders found under ", dir_runs_root)
+times_runs = fn_name_time(paths_runs)
+dir_run = if(nzchar(params$dir_run)) params$dir_run else paths_runs[which.max(times_runs)]
+if(!dir.exists(dir_run)) stop("Run folder not found: ", dir_run)
+time_run = fn_name_time(dir_run)
+
+#2. pick the check log that this run wrote
+#  - 005 writes the check log a minute or so after it creates the run
+#    folder, so the matching log is the first one stamped after the run
+#    started and before the next run started
+paths_logs = list.files(dir_check_logs, pattern = "^all_tools_check_log_VS[0-9]+_[0-9]{14}[.]csv$", full.names = TRUE)
+times_logs = fn_name_time(paths_logs)
+times_later_runs = times_runs[times_runs > time_run]
+time_next_run = if(length(times_later_runs)) min(times_later_runs) else as.POSIXct("2999-01-01")
+if(nzchar(params$path_check_log)) {
+  path_check_log = params$path_check_log
+  } else {
+  keep_logs = times_logs >= time_run & times_logs < time_next_run
+  if(!any(keep_logs)) stop("No check log was written between this run's start (", time_run, ") and the next run's start. The run may not have finished.")
+  path_check_log = paths_logs[keep_logs][which.min(times_logs[keep_logs])]
+  }
+if(!file.exists(path_check_log)) stop("Check log not found: ", path_check_log)
+dt_checks = data.table::fread(path_check_log)
+
+#3. identify the tile the run used from gridmetrics' output name
+#  - gridmetrics names its raster <tile>_gridmetrics.tif
+path_gm_tif = list.files(file.path(dir_run, "gridmetrics"), pattern = "_gridmetrics[.]tif$", full.names = TRUE)[1]
+if(is.na(path_gm_tif)) stop("No gridmetrics raster in ", dir_run, "; cannot tell which tile the run used.")
+name_tile = sub("_gridmetrics[.]tif$", "", basename(path_gm_tif))
+path_las = list.files(dir_lidar_raw, pattern = paste0("^", name_tile, "[.]la[sz]$"), full.names = TRUE)[1]
+if(is.na(path_las)) stop("Tile ", name_tile, " not found in ", dir_lidar_raw)
+
+#4. confirm every output this report draws is present
+nms_needed = c(
+    "catalog/catalog.csv", "catalog/catalog.tif"
+  , "filterdata/first_returns.las", "filterdata/ground_class.las", "filterdata/z_band.las"
+  , "thindata.las", "ground_dem.tif", "ground_points.las"
+  , "clipdata/box.las", "clipdata/box_height_2_200.las", "clipdata/example_plots.shp", "clipdata/outside_plots.las"
+  , "chm.tif", "chm_smooth3.tif", "chm_slope.tif", "returndensity.tif"
+  , "densitymetrics/dm_densitymetrics.tif", "densitymetrics/dm_densitymetrics.csv"
+  , "cloudmetrics_tile.csv", "cloudmetrics_plots.csv"
+  , "topometrics_ground.tif", "topometrics_external_dtm.tif", "gridsurfacestats.tif"
+  , "tree_tops.csv", "crown_segments.tif", "crown_summary.csv"
+  , "pipeline/canopymodel_merged.tif", "pipeline/groundfilter_merged.tif"
+  , "pipeline/canopymaxima_all.csv", "pipeline/_processing/pipeline_state.csv"
+  )
+nms_missing = nms_needed[!file.exists(file.path(dir_run, nms_needed))]
+if(length(nms_missing)) stop("Run folder is missing outputs: ", paste(nms_missing, collapse = ", "))
+
+#5. read the tile and set the shared geometry used by every figure
+#  - x0/y0 are the tile's lower-left corner; every map is drawn in feet
+#    from that corner
+las_raw = suppressWarnings(lidR::readLAS(path_las))
+x0 = las_raw@header$`Min X`
+y0 = las_raw@header$`Min Y`
+tile_width  = las_raw@header$`Max X` - x0
+tile_height = las_raw@header$`Max Y` - y0
+strip_y = tile_height / 2
+strip_half_width = 3
+dt_tile = data.table::data.table(
+    x   = las_raw$X - x0
+  , y   = las_raw$Y - y0
+  , z   = las_raw$Z
+  , cls = las_raw$Classification
+  , ret = las_raw$ReturnNumber
+  , withheld = las_raw$Withheld_flag
+  )
+dt_tile = dt_tile[withheld == FALSE]
+dt_tile_strip = fn_strip(dt_tile)
+rm(las_raw)
+
+#6. show the run details
+dt_run_info = data.table::data.table(
+    item = c("Run folder", "Check log", "Tile", "Tile size", "Points (withheld dropped)", "FUSION2 build tested")
+  , value = c(
+        dir_run
+      , path_check_log
+      , basename(path_las)
+      , sprintf("%.0f x %.0f ft", tile_width, tile_height)
+      , format(nrow(dt_tile), big.mark = ",")
+      , paste(unique(stats::na.omit(dt_checks$build_modified[nzchar(dt_checks$build_modified)])), collapse = ", ")
+      )
+  )
+knitr::kable(dt_run_info, col.names = c("", ""))
+```
+
+## Check results by tool
+
+```{r}
+#| label: check-tally
+#| echo: false
+
+#1. count results per tool, in the order the tools ran
+dt_tally = dt_checks[ , .(
+    checks = .N
+  , passed = sum(result == "pass")
+  , warnings = sum(result == "warn")
+  , failed = sum(result == "fail")
+  ), by = tool]
+dt_tally = rbind(dt_tally, dt_tally[ , .(tool = "All tools", checks = sum(checks), passed = sum(passed), warnings = sum(warnings), failed = sum(failed))])
+knitr::kable(dt_tally, col.names = c("Tool", "Checks", "Passed", "Warnings", "Failed"))
+```
+
+```{r}
+#| label: check-failures
+#| echo: false
+#| results: asis
+
+#1. list any check that did not pass, or say there were none
+dt_not_passed = dt_checks[result != "pass", .(tool, check, observed, expected, result)]
+if(nrow(dt_not_passed) == 0) {
+  cat("Every check in this run passed.\n")
+  } else {
+  cat("**Checks that did not pass:**\n\n")
+  print(knitr::kable(dt_not_passed, col.names = c("Tool", "Check", "Observed", "Expected", "Result")))
+  }
+```
+
+# 1. `catalog`: summarize the tile
+
+**Tool and options.** `catalog <tile> /output:catalog/catalog.csv /density:10`
+
+`catalog` reports each input file's point count and bounding box. With
+`/density:10` it also writes a raster counting the points in each 10 x 10
+ft cell.
+
+**What success looks like.**
+
+- The density raster sits on the tile's real coordinates and carries a
+  coordinate system, so it lines up with the tile in GIS software. On the
+  map, the black outline (the bounding box from the CSV report) sits
+  exactly on the edge of the density grid.
+- Cell counts are fairly even across the tile. Stripes or empty cells
+  inside the tile would point to missing flight lines or a gridding error.
+
+005's checks confirm that the raster's cells add up to the point count,
+but not where the raster is placed. The figure code below checks the
+placement and states the result.
+
+**Automated checks.** `r fn_check_line("catalog")`
+
+```{r}
+#| label: catalog-checks
+#| echo: false
+
+fn_checks("catalog")
+```
+
+```{r}
+#| label: catalog-figure
+#| fig-height: 5.5
+
+#1. read the CSV report and the density raster
+dt_catalog = data.table::fread(file.path(dir_run, "catalog", "catalog.csv"))
+r_catalog = terra::rast(file.path(dir_run, "catalog", "catalog.tif"))
+
+#2. check whether the raster sits on the tile and has a coordinate system
+#  - "on the tile" means its extent overlaps the tile's bounding box
+ext_catalog = as.vector(terra::ext(r_catalog))
+catalog_on_tile = ext_catalog[["xmin"]] < x0 + tile_width & ext_catalog[["xmax"]] > x0 & ext_catalog[["ymin"]] < y0 + tile_height & ext_catalog[["ymax"]] > y0
+catalog_has_crs = nzchar(terra::crs(r_catalog))
+
+#3. map the density
+#  - on the tile: draw it in feet from the tile corner, with the reported
+#    bounds as a black outline
+#  - off the tile: draw it in its own frame instead, since the tile's
+#    outline would sit far outside the map, and say so in the subtitle
+title_catalog = sprintf("catalog: points per 10 ft cell (report says %s points)", format(dt_catalog$PointCount, big.mark = ","))
+if(catalog_on_tile) {
+  dt_box = data.table::data.table(
+      xmin = dt_catalog$MinX - x0
+    , xmax = dt_catalog$MaxX - x0
+    , ymin = dt_catalog$MinY - y0
+    , ymax = dt_catalog$MaxY - y0
+    )
+  p_catalog = fn_map(fn_df_raster(r_catalog), title_catalog, "points") +
+    ggplot2::geom_rect(data = dt_box, ggplot2::aes(xmin = xmin, xmax = xmax, ymin = ymin, ymax = ymax), inherit.aes = FALSE, fill = NA, colour = "black", linewidth = 0.6)
+  } else {
+  p_catalog = fn_map(fn_df_raster(r_catalog, 1, 0, 0), title_catalog, "points") +
+    ggplot2::labs(
+        subtitle = sprintf("NOT on the tile: raster extent is x %s to %s, y %s to %s (the tile starts at x %s, y %s)", ext_catalog[["xmin"]], ext_catalog[["xmax"]], ext_catalog[["ymin"]], ext_catalog[["ymax"]], format(x0, big.mark = ","), format(y0, big.mark = ","))
+      , x = "raster x", y = "raster y"
+      )
+  }
+p_catalog
+```
+
+```{r}
+#| label: catalog-placement-note
+#| echo: false
+#| results: asis
+
+#1. state the placement result in words below the map
+if(catalog_on_tile & catalog_has_crs) {
+  cat("The density raster sits on the tile's coordinates and carries a coordinate system.\n")
+  } else {
+  cat("::: {.callout-warning}\n")
+  if(!catalog_on_tile) cat("**catalog.tif is not placed on the tile.** Its extent starts at the grid origin (0, 0) rather than at the tile's coordinates, so it will not line up with the tile in GIS software. None of 005's checks test this.\n\n")
+  if(!catalog_has_crs) cat("**catalog.tif has no coordinate system attached.**\n")
+  cat(":::\n")
+  }
+```
+
+# 2. `filterdata`: keep points by return, class, or elevation
+
+**Tool and options.** Three runs, each writing one file:
+
+- `filterdata <tile> /output:filterdata/first_returns.las /return:1`
+- `filterdata <tile> /output:filterdata/ground_class.las /class:2`
+- `filterdata <tile> /output:filterdata/z_band.las /minz:<median-10> /maxz:<median+10>`
+  (a 20 ft elevation band centered on the tile's median point elevation)
+
+**What success looks like.** In the side view, grey points are the whole
+tile and blue points are what each filter kept.
+
+- **First returns** mostly trace the top of the canopy, with some reaching
+  the ground through gaps.
+- **Ground class** points trace one thin line along the bottom of the
+  point cloud, with nothing in the canopy.
+- **Elevation band** points fill the space between the two dashed lines
+  and nothing outside them.
+
+**Automated checks.** `r fn_check_line("filterdata")`
+
+```{r}
+#| label: filterdata-checks
+#| echo: false
+
+fn_checks("filterdata")
+```
+
+```{r}
+#| label: filterdata-figure
+#| fig-height: 7.5
+
+#1. read the three filtered files and keep the side-view strip of each
+dt_filters = data.table::data.table(
+    run   = c("first_returns", "ground_class", "z_band")
+  , label = c("First returns (/return:1)", "Ground class (/class:2)", "Elevation band (/minz /maxz)")
+  )
+list_kept = list()
+for(i in seq_len(nrow(dt_filters))) {
+  dt_kept_i = fn_strip(fn_las_dt(file.path(dir_run, "filterdata", paste0(dt_filters$run[i], ".las"))))
+  dt_kept_i[ , label := dt_filters$label[i]]
+  list_kept[[i]] = dt_kept_i
+  }
+dt_kept = data.table::rbindlist(list_kept)
+
+#2. repeat the whole-tile strip once per panel as the grey background
+dt_background = data.table::rbindlist(lapply(dt_filters$label, function(label_i) dt_tile_strip[ , .(x, z, label = label_i)]))
+
+#3. rebuild the elevation band limits the way 005 set them
+z_band = round(stats::median(dt_tile$z)) + c(-10, 10)
+dt_band = data.table::data.table(label = dt_filters$label[3], z = z_band)
+
+#4. draw the three side views, one panel per filter
+dt_kept[ , label := factor(label, levels = dt_filters$label)]
+dt_background[ , label := factor(label, levels = dt_filters$label)]
+dt_band[ , label := factor(label, levels = dt_filters$label)]
+ggplot2::ggplot() +
+  ggplot2::geom_point(data = dt_background, ggplot2::aes(x = x, y = z), colour = col_points, size = 0.4) +
+  ggplot2::geom_point(data = dt_kept, ggplot2::aes(x = x, y = z), colour = col_blue, size = 0.6) +
+  ggplot2::geom_hline(data = dt_band, ggplot2::aes(yintercept = z), linetype = "dashed", colour = "black", linewidth = 0.4) +
+  ggplot2::facet_wrap(~ label, ncol = 1) +
+  ggplot2::labs(title = "filterdata: kept points (blue) over the whole tile (grey), side view", x = "feet east of corner", y = "elevation (ft)") +
+  fn_theme()
+```
+
+# 3. `thindata`: keep at most one point per cell
+
+**Tool and options.** `thindata <tile> /output:thindata.las /cellsize:2`
+
+`thindata` keeps at most one point in each 2 x 2 ft cell. Its grid lines
+fall on whole multiples of the cell size in the tile's coordinates.
+
+**What success looks like.** The figure zooms in on a 20 x 20 ft patch in
+the middle of the tile. Grey points are the original tile and orange
+points are the ones kept.
+
+- Every grid square that holds grey points holds exactly one orange point.
+- No square holds two orange points.
+
+**Automated checks.** `r fn_check_line("thindata")`
+
+```{r}
+#| label: thindata-checks
+#| echo: false
+
+fn_checks("thindata")
+```
+
+```{r}
+#| label: thindata-figure
+#| fig-height: 6.5
+
+#1. read the thinned file
+dt_thin = fn_las_dt(file.path(dir_run, "thindata.las"))
+
+#2. pick a 20 x 20 ft window in the middle of the tile, snapped to the
+#   2 ft grid in the tile's own coordinates
+cellsize_thin = 2
+win_x = floor((x0 + tile_width / 2) / cellsize_thin) * cellsize_thin - x0 + c(0, 20)
+win_y = floor((y0 + tile_height / 2) / cellsize_thin) * cellsize_thin - y0 + c(0, 20)
+dt_win_all  = dt_tile[x >= win_x[1] & x < win_x[2] & y >= win_y[1] & y < win_y[2]]
+dt_win_thin = dt_thin[x >= win_x[1] & x < win_x[2] & y >= win_y[1] & y < win_y[2]]
+
+#3. draw the grid, the original points, and the kept points
+grid_x = seq(win_x[1], win_x[2], by = cellsize_thin)
+grid_y = seq(win_y[1], win_y[2], by = cellsize_thin)
+ggplot2::ggplot() +
+  ggplot2::geom_vline(xintercept = grid_x, colour = "#d4d3cc", linewidth = 0.3) +
+  ggplot2::geom_hline(yintercept = grid_y, colour = "#d4d3cc", linewidth = 0.3) +
+  ggplot2::geom_point(data = dt_win_all, ggplot2::aes(x = x, y = y), colour = col_points, size = 0.8) +
+  ggplot2::geom_point(data = dt_win_thin, ggplot2::aes(x = x, y = y), colour = col_orange, size = 2.2) +
+  ggplot2::coord_equal(xlim = win_x, ylim = win_y, expand = FALSE) +
+  ggplot2::labs(
+      title = sprintf("thindata: %s points kept of %s in this window", nrow(dt_win_thin), nrow(dt_win_all))
+    , subtitle = "Orange = kept, grey = original, lines = 2 ft thinning grid"
+    , x = "feet east of corner", y = "feet north of corner"
+    ) +
+  fn_theme() +
+  ggplot2::theme(panel.grid.major = ggplot2::element_blank())
+```
+
+# 4. `groundfilter`: build the ground surface
+
+**Tool and options.**
+`groundfilter <tile> /output-raster:ground_dem.tif /output-points:ground_points.las /cellsize:5`
+
+`groundfilter` identifies ground returns and interpolates a 5 ft ground
+surface (a DEM, digital elevation model) from them. Every later tool that
+reports height above ground uses this surface.
+
+**What success looks like.**
+
+- The map shows smooth terrain. Contour lines should be continuous, with
+  no pits or spikes the size of a single cell.
+- In the side view, the FUSION2 ground line (blue) runs along the bottom
+  of the point cloud and through the points it classed as ground (aqua).
+  It stays close to the reference surface built independently in R with
+  `lidR` (orange, dashed).
+- In the comparison panels, points fall along the 1:1 line, and the
+  difference map is mostly near zero (grey) with no large patches of
+  strong blue or red.
+
+**Automated checks.** `r fn_check_line("groundfilter")`
+
+```{r}
+#| label: groundfilter-checks
+#| echo: false
+
+fn_checks("groundfilter")
+```
+
+```{r}
+#| label: groundfilter-map
+#| fig-height: 6
+
+#1. read the ground surface and map it with contour lines
+#  - the contour interval adapts to the terrain, so flat and steep tiles
+#    both get a readable number of lines
+r_ground = terra::rast(file.path(dir_run, "ground_dem.tif"))
+df_ground = fn_df_raster(r_ground)
+step_ground = fn_contour_step(df_ground$value)
+fn_map(df_ground, sprintf("groundfilter: ground elevation with %s ft contours", step_ground), "elevation (ft)") +
+  ggplot2::geom_contour(data = df_ground[!is.na(value)], ggplot2::aes(x = x, y = y, z = value), binwidth = step_ground, colour = "white", linewidth = 0.3, inherit.aes = FALSE)
+```
+
+```{r}
+#| label: groundfilter-profile
+#| fig-height: 5
+
+#1. build the independent lidR reference ground surface on the same 5 ft
+#   cells
+#  - withheld points are dropped first, matching FUSION2
+las_ref = suppressWarnings(lidR::readLAS(path_las))
+las_ref = suppressWarnings(lidR::filter_poi(las_ref, !Withheld_flag))
+r_ground_ref = suppressWarnings(lidR::rasterize_terrain(las_ref, res = 5, algorithm = lidR::tin()))
+r_ground_ref = terra::resample(r_ground_ref, r_ground, method = "bilinear")
+rm(las_ref)
+
+#2. build both ground lines along the strip and read the ground points in
+#   the strip
+dt_line_fusion = fn_profile(r_ground)
+dt_line_fusion[ , surface := "FUSION2 groundfilter"]
+dt_line_ref = fn_profile(r_ground_ref)
+dt_line_ref[ , surface := "lidR reference"]
+dt_lines = rbind(dt_line_fusion, dt_line_ref)
+dt_ground_pts_strip = fn_strip(fn_las_dt(file.path(dir_run, "ground_points.las")))
+
+#3. zoom the side view to the ground: from just below the lowest ground
+#   point to 30 ft above the highest
+z_view = range(dt_ground_pts_strip$z, na.rm = TRUE) + c(-5, 30)
+
+#4. draw the side view
+ggplot2::ggplot() +
+  ggplot2::geom_point(data = dt_tile_strip, ggplot2::aes(x = x, y = z), colour = col_points, size = 0.4) +
+  ggplot2::geom_point(data = dt_ground_pts_strip, ggplot2::aes(x = x, y = z), colour = col_aqua, size = 0.9) +
+  ggplot2::geom_line(data = dt_lines, ggplot2::aes(x = x, y = value, colour = surface, linetype = surface), linewidth = 0.8) +
+  ggplot2::scale_colour_manual(values = c("FUSION2 groundfilter" = col_blue, "lidR reference" = col_orange)) +
+  ggplot2::scale_linetype_manual(values = c("FUSION2 groundfilter" = "solid", "lidR reference" = "dashed")) +
+  ggplot2::coord_cartesian(ylim = z_view) +
+  ggplot2::labs(
+      title = "groundfilter: ground surface along the side-view strip"
+    , subtitle = "Aqua = points written to ground_points.las, grey = all points"
+    , x = "feet east of corner", y = "elevation (ft)", colour = NULL, linetype = NULL
+    ) +
+  fn_theme() +
+  ggplot2::theme(legend.position = "top")
+```
+
+```{r}
+#| label: groundfilter-compare
+#| fig-height: 5
+
+#1. pair each FUSION2 ground cell with the reference cell at the same spot
+dt_ground_cmp = data.table::data.table(
+    fusion2 = terra::values(r_ground)[ , 1]
+  , lidr_reference = terra::values(r_ground_ref)[ , 1]
+  )
+dt_ground_cmp = dt_ground_cmp[!is.na(fusion2) & !is.na(lidr_reference)]
+range_shared = range(c(dt_ground_cmp$fusion2, dt_ground_cmp$lidr_reference))
+
+#2. scatter FUSION2 (x) against the reference (y) on matching axes
+p_scatter = ggplot2::ggplot(dt_ground_cmp, ggplot2::aes(x = fusion2, y = lidr_reference)) +
+  ggplot2::geom_abline(slope = 1, intercept = 0, colour = "grey50") +
+  ggplot2::geom_point(colour = col_blue, alpha = 0.6, size = 1.2) +
+  ggplot2::coord_fixed(ratio = 1, xlim = range_shared, ylim = range_shared) +
+  ggplot2::labs(title = "FUSION2 vs. lidR reference", x = "FUSION2 ground (ft)", y = "lidR reference ground (ft)") +
+  fn_theme()
+
+#3. map the difference, FUSION2 minus reference
+r_ground_diff = r_ground - r_ground_ref
+p_diff = fn_map(fn_df_raster(r_ground_diff), "FUSION2 minus lidR reference", "ft", scale = "div")
+
+patchwork::wrap_plots(p_scatter, p_diff, ncol = 2)
+```
+
+# 5. `clipdata`: cut out boxes and plots
+
+**Tool and options.** Four runs:
+
+- `clipdata <tile> /output:clipdata/box.las /extent:<box>` -- a 100 x 100 ft
+  box starting 25 ft in from the tile's lower-left corner.
+- `clipdata <tile> /output:clipdata/box_height_2_200.las /extent:<box> /ground:ground_dem.tif /minz:2 /maxz:200`
+  -- the same box, keeping only points 2 to 200 ft above the ground.
+- `clipdata <tile> /output:clipdata/per_plot /shape:example_plots.shp /multifile /field:plot_id`
+  -- one file per 30 ft radius circular plot, named from the `plot_id`
+  field.
+- `clipdata <tile> /output:clipdata/outside_plots.las /shape:example_plots.shp /outside`
+  -- everything outside both plots.
+
+**What success looks like.**
+
+- **Left map:** the box and plot points (colored) fill their black
+  outlines exactly, with no points outside them.
+- **Right map:** the outside-plots output covers the tile except for two
+  empty circles that match the plot outlines.
+- **Side view:** every kept point (blue) sits above the dashed 2 ft line.
+  The grey points below it were in the box but too low.
+
+**Automated checks.** `r fn_check_line("clipdata")`
+
+```{r}
+#| label: clipdata-checks
+#| echo: false
+
+fn_checks("clipdata")
+```
+
+```{r}
+#| label: clipdata-maps
+#| fig-height: 5.5
+
+#1. read the clip outputs
+dt_clip_box = fn_las_dt(file.path(dir_run, "clipdata", "box.las"))
+dt_clip_box[ , output := "box.las"]
+paths_plot = list.files(file.path(dir_run, "clipdata", "per_plot"), pattern = "[.]la[sz]$", full.names = TRUE)
+list_plot = list()
+for(i in seq_along(paths_plot)) {
+  dt_plot_i = fn_las_dt(paths_plot[i])
+  dt_plot_i[ , output := basename(paths_plot[i])]
+  list_plot[[i]] = dt_plot_i
+  }
+dt_clip_plots = data.table::rbindlist(list_plot)
+dt_clip_outside = fn_las_dt(file.path(dir_run, "clipdata", "outside_plots.las"))
+
+#2. build the outlines: the box 005 requested and the plot circles from
+#   the shapefile the tool read
+dt_box_req = data.table::data.table(xmin = 25, xmax = 125, ymin = 25, ymax = 125)
+sf_plots = sf::st_read(file.path(dir_run, "clipdata", "example_plots.shp"), quiet = TRUE)
+dt_circles = data.table::as.data.table(sf::st_coordinates(sf_plots))
+dt_circles[ , x := X - x0]
+dt_circles[ , y := Y - y0]
+
+#3. thin the grey background to one point in five, to keep the map light
+dt_background_map = dt_tile[seq(1, .N, by = 5)]
+
+#4. left: box and plot clips over the tile
+dt_clip_shown = rbind(dt_clip_box, dt_clip_plots)
+p_inside = ggplot2::ggplot() +
+  ggplot2::geom_point(data = dt_background_map, ggplot2::aes(x = x, y = y), colour = col_points, size = 0.2) +
+  ggplot2::geom_point(data = dt_clip_shown, ggplot2::aes(x = x, y = y, colour = output), size = 0.25) +
+  ggplot2::geom_rect(data = dt_box_req, ggplot2::aes(xmin = xmin, xmax = xmax, ymin = ymin, ymax = ymax), inherit.aes = FALSE, fill = NA, colour = "black", linewidth = 0.5) +
+  ggplot2::geom_path(data = dt_circles, ggplot2::aes(x = x, y = y, group = L2), colour = "black", linewidth = 0.5) +
+  ggplot2::scale_colour_manual(values = c(col_blue, col_orange, col_aqua)) +
+  ggplot2::guides(colour = ggplot2::guide_legend(override.aes = list(size = 3))) +
+  ggplot2::coord_equal(xlim = c(0, tile_width), ylim = c(0, tile_height), expand = FALSE) +
+  ggplot2::labs(title = "Box and per-plot clips", x = "feet east of corner", y = "feet north of corner", colour = NULL) +
+  fn_theme() +
+  ggplot2::theme(legend.position = "bottom")
+
+#5. right: everything outside the plots
+p_outside = ggplot2::ggplot() +
+  ggplot2::geom_point(data = dt_clip_outside[seq(1, .N, by = 5)], ggplot2::aes(x = x, y = y), colour = col_blue, size = 0.2) +
+  ggplot2::geom_path(data = dt_circles, ggplot2::aes(x = x, y = y, group = L2), colour = "black", linewidth = 0.5) +
+  ggplot2::coord_equal(xlim = c(0, tile_width), ylim = c(0, tile_height), expand = FALSE) +
+  ggplot2::labs(title = "/outside: everything but the plots", subtitle = "one point in five shown", x = "feet east of corner", y = NULL) +
+  fn_theme()
+
+patchwork::wrap_plots(p_inside, p_outside, ncol = 2)
+```
+
+```{r}
+#| label: clipdata-height
+#| fig-height: 4.5
+
+#1. read the height-limited clip and express both clips as height above
+#   the FUSION2 ground surface
+dt_clip_ht = fn_las_dt(file.path(dir_run, "clipdata", "box_height_2_200.las"))
+dt_clip_box[ , height := z - fn_ground_under(r_ground, dt_clip_box)]
+dt_clip_ht[ , height := z - fn_ground_under(r_ground, dt_clip_ht)]
+
+#2. keep a strip through the middle of the box
+box_mid_y = 75
+dt_box_strip = dt_clip_box[abs(y - box_mid_y) <= strip_half_width]
+dt_ht_strip  = dt_clip_ht[abs(y - box_mid_y) <= strip_half_width]
+
+#3. draw the side view in height above ground
+ggplot2::ggplot() +
+  ggplot2::geom_point(data = dt_box_strip, ggplot2::aes(x = x, y = height), colour = col_points, size = 0.6) +
+  ggplot2::geom_point(data = dt_ht_strip, ggplot2::aes(x = x, y = height), colour = col_blue, size = 0.6) +
+  ggplot2::geom_hline(yintercept = 2, linetype = "dashed", linewidth = 0.4) +
+  ggplot2::labs(
+      title = "clipdata /minz:2 /maxz:200 with /ground: side view through the box"
+    , subtitle = "Blue = kept, grey = in the box but outside the height limits, dashed line = 2 ft"
+    , x = "feet east of corner", y = "height above ground (ft)"
+    ) +
+  fn_theme()
+```
+
+# 6. `canopymodel`: canopy height surface
+
+**Tool and options.** Three runs, all with `/ground:ground_dem.tif /cellsize:3`:
+
+- `canopymodel <tile> ... /output:chm.tif` -- plain canopy height model
+  (CHM): the highest point in each 3 ft cell, minus the ground.
+- `canopymodel <tile> ... /output:chm_smooth3.tif /smooth:3` -- smoothed
+  with a 3 x 3 cell filter.
+- `canopymodel <tile> ... /output:chm_slope.tif /slope` -- adjusted for
+  terrain slope.
+
+**What success looks like.**
+
+- All three maps show distinct tree crowns, with gaps between them. The
+  smoothed version looks softer, and the slope-adjusted version is nearly
+  identical to the plain one on gentle terrain.
+- Single dark grey cells (no value) inside the canopy are cells that no
+  point fell in. Compare them across the three versions: holes that stay
+  in the same place after `/smooth:3` show that the smoothing filter
+  leaves empty cells empty rather than filling them from their neighbors.
+- No cell is taller than the tallest point in the tile.
+- In the side view, the plain CHM line (blue) rides along the top of the
+  point cloud. The smoothed line (orange) follows it with softened peaks.
+
+**Automated checks.** `r fn_check_line("canopymodel")`
+
+```{r}
+#| label: canopymodel-checks
+#| echo: false
+
+fn_checks("canopymodel")
+```
+
+```{r}
+#| label: canopymodel-maps
+#| fig-height: 4.5
+
+#1. read the three canopy models and stack them into one table
+r_chm = terra::rast(file.path(dir_run, "chm.tif"))
+r_chm_smooth = terra::rast(file.path(dir_run, "chm_smooth3.tif"))
+r_chm_slope = terra::rast(file.path(dir_run, "chm_slope.tif"))
+df_chm_all = rbind(
+    fn_df_raster(r_chm)[ , version := "plain"]
+  , fn_df_raster(r_chm_smooth)[ , version := "/smooth:3"]
+  , fn_df_raster(r_chm_slope)[ , version := "/slope"]
+  )
+df_chm_all[ , version := factor(version, levels = c("plain", "/smooth:3", "/slope"))]
+
+#2. map all three on one shared height scale
+#  - interior axis breaks only, so neighboring panels' end labels don't
+#    collide
+fn_map(df_chm_all, "canopymodel: canopy height, three versions", "height (ft)") +
+  ggplot2::facet_wrap(~ version, ncol = 3) +
+  ggplot2::scale_x_continuous(breaks = c(50, 100, 150)) +
+  ggplot2::theme(panel.spacing = grid::unit(1, "lines"))
+```
+
+```{r}
+#| label: canopymodel-profile
+#| fig-height: 4.5
+
+#1. express the strip's points as height above the FUSION2 ground
+dt_tile_strip[ , height := z - fn_ground_under(r_ground, dt_tile_strip)]
+
+#2. build the plain and smoothed CHM lines along the strip
+dt_chm_lines = rbind(
+    fn_profile(r_chm)[ , version := "plain"]
+  , fn_profile(r_chm_smooth)[ , version := "/smooth:3"]
+  )
+
+#3. draw the side view
+ggplot2::ggplot() +
+  ggplot2::geom_point(data = dt_tile_strip, ggplot2::aes(x = x, y = height), colour = col_points, size = 0.4) +
+  ggplot2::geom_line(data = dt_chm_lines, ggplot2::aes(x = x, y = value, colour = version), linewidth = 0.8) +
+  ggplot2::scale_colour_manual(values = c("plain" = col_blue, "/smooth:3" = col_orange)) +
+  ggplot2::labs(title = "canopymodel: canopy surface along the side-view strip", x = "feet east of corner", y = "height above ground (ft)", colour = NULL) +
+  fn_theme() +
+  ggplot2::theme(legend.position = "top")
+```
+
+# 7. `returndensity`: point density and first-return share
+
+**Tool and options.** `returndensity <tile> /output:returndensity.tif /cellsize:10`
+
+`returndensity` writes two bands per 10 ft cell: points per square unit,
+and the percent of returns that are first returns.
+
+**What success looks like.**
+
+- Density is fairly even. Stripes along one direction usually mark
+  overlapping flight lines, which is a property of the data, not an error.
+  Isolated empty cells inside the tile would be an error.
+- The first-return percent stays between 0 and 100. It tends to be lower
+  where the canopy is dense, because more pulses there return several
+  echoes.
+
+**Automated checks.** `r fn_check_line("returndensity")`
+
+```{r}
+#| label: returndensity-checks
+#| echo: false
+
+fn_checks("returndensity")
+```
+
+```{r}
+#| label: returndensity-maps
+#| fig-height: 4.5
+
+#1. read both bands
+r_rd = terra::rast(file.path(dir_run, "returndensity.tif"))
+
+#2. map each band on its own scale
+p_density = fn_map(fn_df_raster(r_rd, 1), "Point density", "points per\nsquare foot")
+p_first = fn_map(fn_df_raster(r_rd, 2), "First returns", "percent", limits = c(0, 100))
+patchwork::wrap_plots(p_density, p_first, ncol = 2)
+```
+
+# 8. `densitymetrics`: returns by height layer
+
+**Tool and options.**
+`densitymetrics <tile> ground_dem.tif /outdir:densitymetrics /output:dm /cellsize:10 /output-table:densitymetrics/dm_densitymetrics.csv`
+
+`densitymetrics` counts returns in six height layers above ground, split
+at 0.5, 2, 5, 10, and 20 ft. It writes one raster band per layer and a
+per-cell table.
+
+**What success looks like.**
+
+- On this closed-canopy tile, most returns fall in the top layer (above
+  20 ft), and the bar for that layer is by far the longest.
+- In the maps, each cell's share of returns in the top layer is high
+  nearly everywhere. Cells with a lower share should line up with canopy
+  gaps in the canopy height map in section 6.
+
+**Automated checks.** `r fn_check_line("densitymetrics")`
+
+```{r}
+#| label: densitymetrics-checks
+#| echo: false
+
+fn_checks("densitymetrics")
+```
+
+```{r}
+#| label: densitymetrics-figure
+#| fig-height: 7
+
+#1. name the six layers by their height limits
+nms_layers = c("below 0.5 ft", "0.5-2 ft", "2-5 ft", "5-10 ft", "10-20 ft", "above 20 ft")
+
+#2. total the returns in each layer from the per-cell table
+dt_dm = data.table::fread(file.path(dir_run, "densitymetrics", "dm_densitymetrics.csv"))
+nms_cnt = grep("^StrataCnt_", names(dt_dm), value = TRUE)
+dt_layer_totals = data.table::data.table(layer = factor(nms_layers, levels = nms_layers), returns = colSums(dt_dm[ , ..nms_cnt]))
+
+#3. bar chart of the totals, labelled with their counts
+p_bars = ggplot2::ggplot(dt_layer_totals, ggplot2::aes(x = returns, y = layer)) +
+  ggplot2::geom_col(fill = col_blue, width = 0.7) +
+  ggplot2::geom_text(ggplot2::aes(label = format(returns, big.mark = ",")), hjust = -0.1, size = 3.3) +
+  ggplot2::scale_x_continuous(expand = ggplot2::expansion(mult = c(0, 0.2)), labels = scales::label_comma()) +
+  ggplot2::labs(title = "Returns per height layer, whole tile", x = "returns", y = NULL) +
+  fn_theme()
+
+#4. map each layer's share of the cell's returns from the raster bands
+r_dm = terra::rast(file.path(dir_run, "densitymetrics", "dm_densitymetrics.tif"))
+r_dm_share = r_dm / sum(r_dm)
+list_share = list()
+for(k in seq_len(terra::nlyr(r_dm_share))) {
+  df_k = fn_df_raster(r_dm_share, k)
+  df_k[ , layer := nms_layers[k]]
+  list_share[[k]] = df_k
+  }
+df_share = data.table::rbindlist(list_share)
+df_share[ , layer := factor(layer, levels = nms_layers)]
+p_share = fn_map(df_share, "Share of each cell's returns, by layer", "share", limits = c(0, 1)) +
+  ggplot2::facet_wrap(~ layer, ncol = 3) +
+  ggplot2::theme(axis.text = ggplot2::element_blank(), axis.title = ggplot2::element_blank())
+
+patchwork::wrap_plots(p_bars, p_share, ncol = 1, heights = c(1, 2))
+```
+
+# 9. `gridmetrics`: the full metric grid
+
+**Tool and options.**
+`gridmetrics <tile> ground_dem.tif /cellsize:10 /outdir:gridmetrics /strata:0.5,2,5,10,20 /strataraster /surfstats /output-table:gridmetrics/gridmetrics_table.csv`
+
+`gridmetrics` computes the full set of height and intensity statistics
+for each 10 ft cell (`r terra::nlyr(terra::rast(path_gm_tif))` raster
+bands on this run). Heights are measured above the ground surface from
+section 4. Six representative bands are shown below.
+
+**What success looks like.**
+
+- Maximum and 95th-percentile height follow the same crown pattern as the
+  canopy height map in section 6, at a coarser 10 ft cell size.
+- Canopy cover is high across this closed-canopy tile.
+- Height variability is highest where tall crowns sit next to gaps.
+- No band is blank. The automated checks confirm this for every band, not
+  just the six shown.
+
+**Automated checks.** `r fn_check_line("gridmetrics")`
+
+```{r}
+#| label: gridmetrics-checks
+#| echo: false
+
+fn_checks("gridmetrics")
+```
+
+```{r}
+#| label: gridmetrics-maps
+#| fig-height: 6
+
+#1. choose six bands that summarize height, cover, density, and intensity
+r_gm = terra::rast(path_gm_tif)
+dt_gm_bands = data.table::data.table(
+    band  = c("elev_max", "elev_p95", "elev_stddev", "canopy_cover", "point_density", "int_mean")
+  , title = c("Maximum height", "95th percentile height", "Height standard deviation", "Canopy cover", "Point density", "Mean intensity")
+  )
+dt_gm_bands = dt_gm_bands[band %in% names(r_gm)]
+
+#2. map each band on its own scale
+list_gm_maps = list()
+for(i in seq_len(nrow(dt_gm_bands))) {
+  list_gm_maps[[i]] = fn_map(fn_df_raster(r_gm, dt_gm_bands$band[i]), dt_gm_bands$title[i], dt_gm_bands$band[i]) +
+    ggplot2::theme(axis.text = ggplot2::element_blank(), axis.title = ggplot2::element_blank())
+  }
+patchwork::wrap_plots(list_gm_maps, ncol = 3)
+```
+
+# 10. `cloudmetrics`: one summary for the tile and for each plot
+
+**Tool and options.** Two runs:
+
+- `cloudmetrics <tile> /ground:ground_dem.tif /output:cloudmetrics_tile.csv /minht:2 /strata:0.5,2,5,10,20`
+  -- one row for the whole tile.
+- `cloudmetrics <tile> /ground:ground_dem.tif /output:cloudmetrics_plots.csv /shape:example_plots.shp /field:plot_id`
+  -- one row per circular plot, labelled from `plot_id`.
+
+**What success looks like.**
+
+- The table has one row for the tile and one per plot, labelled `plotA`
+  and `plotB`.
+- Each curve in the chart rises steadily from low to high percentiles.
+  The plot curves resemble the tile curve but are not identical, since
+  each plot samples a different patch of forest.
+
+**Automated checks.** `r fn_check_line("cloudmetrics")`
+
+```{r}
+#| label: cloudmetrics-checks
+#| echo: false
+
+fn_checks("cloudmetrics")
+```
+
+```{r}
+#| label: cloudmetrics-table
+#| echo: false
+
+#1. stack the tile row and the plot rows with a common label
+dt_cm_tile = data.table::fread(file.path(dir_run, "cloudmetrics_tile.csv"))
+dt_cm_plots = data.table::fread(file.path(dir_run, "cloudmetrics_plots.csv"))
+dt_cm_tile[ , Label := "whole tile"]
+dt_cm = data.table::rbindlist(list(dt_cm_tile, dt_cm_plots), fill = TRUE)
+
+#2. show the headline metrics
+nms_cm_show = intersect(c("Label", "TotalPoints", "CanopyPoints", "CanopyCoverPct", "elev_mean", "elev_p95", "elev_max"), names(dt_cm))
+knitr::kable(dt_cm[ , ..nms_cm_show], digits = 1, format.args = list(big.mark = ","))
+```
+
+```{r}
+#| label: cloudmetrics-figure
+#| fig-height: 4.5
+
+#1. reshape the height percentiles to one row per area and percentile
+nms_pct = grep("^elev_p[0-9]{2}$", names(dt_cm), value = TRUE)
+dt_pct = data.table::melt(dt_cm[ , c("Label", nms_pct), with = FALSE], id.vars = "Label", variable.name = "percentile", value.name = "height")
+dt_pct[ , percentile := as.numeric(sub("elev_p", "", percentile))]
+dt_pct[ , Label := factor(Label, levels = c("whole tile", sort(unique(dt_cm_plots$Label))))]
+
+#2. draw the percentile curves
+#  - the curves converge at the top percentiles, so the legend names them
+#    rather than labels at the line ends, which would overlap
+ggplot2::ggplot(dt_pct, ggplot2::aes(x = percentile, y = height, colour = Label)) +
+  ggplot2::geom_line(linewidth = 0.8) +
+  ggplot2::geom_point(size = 2) +
+  ggplot2::scale_colour_manual(values = c(col_blue, col_orange, col_aqua)) +
+  ggplot2::scale_x_continuous(limits = c(0, 100), breaks = c(0, 25, 50, 75, 100)) +
+  ggplot2::scale_y_continuous(limits = c(0, NA)) +
+  ggplot2::labs(title = "cloudmetrics: height percentiles", x = "percentile", y = "height above ground (ft)", colour = NULL) +
+  fn_theme() +
+  ggplot2::theme(legend.position = "top")
+```
+
+# 11. `topometrics`: slope and aspect
+
+**Tool and options.** Two runs:
+
+- `topometrics ground_dem.tif /output:topometrics_ground.tif` -- on the
+  ground surface from section 4.
+- `topometrics <external DTM> /output:topometrics_external_dtm.tif` -- on
+  a separate USGS bare-earth raster from the Grays Harbor example site.
+  This run tests that the tool keeps the input's coordinate system. That
+  site is not the example tile, so its map does not line up with the other
+  figures.
+
+**What success looks like.** Color shows slope, and the arrows point in
+the direction each slope faces (downhill).
+
+- Arrows cross the contour lines at right angles and point from high
+  ground to low ground.
+- Steeper colors appear where the contours bunch together.
+- On nearly flat ground, small bumps in the ground surface can show up as
+  square rings of higher slope, one or two cells across. These follow the
+  ground surface's own cells and may come from how it was interpolated,
+  rather than from the terrain. Compare them with the ground map in
+  section 4.
+- Cells along the outer edge have no full set of neighbors, so they have
+  no slope value and show as dark grey.
+
+**Automated checks.** `r fn_check_line("topometrics")`
+
+```{r}
+#| label: topometrics-checks
+#| echo: false
+
+fn_checks("topometrics")
+```
+
+```{r}
+#| label: topometrics-maps
+#| fig-height: 5.5
+
+#1. define a helper that draws one slope map with downhill arrows
+#  - arrows come from a regular sample of cells, and are drawn only where
+#    the slope is over 2 degrees, since aspect is unstable on flat ground
+#  - the tool reports aspect as a compass bearing (0 = north, clockwise);
+#    ggplot's arrow angle is measured from east, counterclockwise
+fn_slope_map = function(path_topo, path_dem, title, x_origin, y_origin, n_arrows){
+  r_topo = terra::rast(path_topo)
+  df_slope = fn_df_raster(r_topo, "slope_degrees", x_origin, y_origin)
+  df_dem = fn_df_raster(terra::rast(path_dem), 1, x_origin, y_origin)
+  dt_arrows = data.table::as.data.table(terra::spatSample(r_topo, size = n_arrows, method = "regular", xy = TRUE, na.rm = TRUE))
+  dt_arrows = dt_arrows[slope_degrees > 2]
+  dt_arrows[ , x := x - x_origin]
+  dt_arrows[ , y := y - y_origin]
+  dt_arrows[ , angle := (90 - aspect_degrees) * pi / 180]
+  arrow_length = 0.6 * (max(df_slope$x) - min(df_slope$x)) / sqrt(n_arrows)
+  contour_step = fn_contour_step(df_dem$value)
+  fn_map(df_slope, title, "slope (degrees)") +
+    ggplot2::geom_contour(data = df_dem[!is.na(value)], ggplot2::aes(x = x, y = y, z = value), binwidth = contour_step, colour = "white", linewidth = 0.3, inherit.aes = FALSE) +
+    ggplot2::geom_spoke(data = dt_arrows, ggplot2::aes(x = x, y = y, angle = angle), radius = arrow_length, colour = col_orange, linewidth = 0.5, arrow = grid::arrow(length = grid::unit(0.08, "cm")), inherit.aes = FALSE)
+  }
+
+#2. map the ground-surface run and the external-DTM run
+#  - the external DTM is drawn in feet from its own lower-left corner
+path_dtm_external = file.path("data", "raw", "lidar_dtm_examples", "site_grays_harbor", "usgs_lidar_dtm.tif")
+ext_external = terra::ext(terra::rast(path_dtm_external))
+p_topo_ground = fn_slope_map(file.path(dir_run, "topometrics_ground.tif"), file.path(dir_run, "ground_dem.tif"), "Tile ground surface", x0, y0, 225)
+p_topo_external = fn_slope_map(file.path(dir_run, "topometrics_external_dtm.tif"), path_dtm_external, "External USGS DTM (different site)", ext_external$xmin, ext_external$ymin, 400)
+patchwork::wrap_plots(p_topo_ground, p_topo_external, ncol = 2)
+```
+
+# 12. `gridsurfacestats`: surface roughness
+
+**Tool and options.**
+`gridsurfacestats chm.tif /output:gridsurfacestats.tif /reference:chm_smooth3.tif`
+
+`gridsurfacestats` measures how rough a surface is. It runs here on the
+canopy height model from section 6, with the smoothed version as a
+reference surface. It writes three bands:
+
+- **surface area ratio**: the 3D surface area of each cell divided by its
+  flat area.
+- **roughness**: how much the surface varies around each cell.
+- **volume difference**: the volume between the canopy surface and the
+  smoothed reference.
+
+**What success looks like.**
+
+- Surface area ratio is 1 or more everywhere, since a surface can never
+  have less area than its flat footprint. It is highest at crown edges,
+  where the canopy drops steeply into gaps.
+- Roughness is highest in the same places.
+- Volume difference is near zero (grey) on even canopy. It has opposite
+  signs on crown peaks, which smoothing lowers, and in narrow gaps, which
+  smoothing fills.
+
+**Automated checks.** `r fn_check_line("gridsurfacestats")`
+
+```{r}
+#| label: gridsurfacestats-checks
+#| echo: false
+
+fn_checks("gridsurfacestats")
+```
+
+```{r}
+#| label: gridsurfacestats-maps
+#| fig-height: 4
+
+#1. read the three bands and map each on its own scale
+r_surf = terra::rast(file.path(dir_run, "gridsurfacestats.tif"))
+p_sar = fn_map(fn_df_raster(r_surf, "surface_area_ratio"), "Surface area ratio", "ratio")
+p_rough = fn_map(fn_df_raster(r_surf, "roughness"), "Roughness", "roughness")
+p_vol = fn_map(fn_df_raster(r_surf, "volume_diff"), "Volume difference", "volume", scale = "div")
+patchwork::wrap_plots(p_sar, p_rough, p_vol, ncol = 3) &
+  ggplot2::theme(axis.text = ggplot2::element_blank(), axis.title = ggplot2::element_blank(), legend.position = "bottom")
+```
+
+# 13. `canopymaxima`: find tree tops
+
+**Tool and options.** `canopymaxima chm.tif /output:tree_tops.csv /minht:2`
+
+`canopymaxima` finds local height peaks on the canopy height model and
+reports each as a tree top with its location and height.
+
+**What success looks like.**
+
+- Each tree top (aqua) sits on a bright local peak of the canopy map.
+- There is roughly one top per visible crown. Several tops clustered on
+  one crown suggest over-detection. A large crown with no top suggests
+  under-detection.
+- No tops fall in canopy gaps below 2 ft.
+- Tops lined up along the tile's outer edge are likely edge effects. A
+  cell on the edge has no neighbors on one side, so it can count as a peak
+  even when the crown continues past the tile boundary.
+
+**Automated checks.** `r fn_check_line("canopymaxima")`
+
+```{r}
+#| label: canopymaxima-checks
+#| echo: false
+
+fn_checks("canopymaxima")
+```
+
+```{r}
+#| label: canopymaxima-figure
+#| fig-height: 7
+
+#1. read the tree tops and place them in feet from the corner
+dt_tops = data.table::fread(file.path(dir_run, "tree_tops.csv"))
+dt_tops[ , x := X - x0]
+dt_tops[ , y := Y - y0]
+
+#2. draw the tops over the canopy height model
+#  - each top gets a white ring so it stays visible on dark cells
+df_chm = fn_df_raster(r_chm)
+fn_map(df_chm, sprintf("canopymaxima: %d tree tops over the canopy height model", nrow(dt_tops)), "height (ft)") +
+  ggplot2::geom_point(data = dt_tops, ggplot2::aes(x = x, y = y), inherit.aes = FALSE, shape = 21, fill = col_aqua, colour = "white", size = 2.6, stroke = 0.7)
+```
+
+# 14. `treeseg`: outline tree crowns
+
+**Tool and options.**
+`treeseg chm.tif /output-raster:crown_segments.tif /output-table:crown_summary.csv /minht:2`
+
+`treeseg` grows a crown region outward from each peak on the canopy height
+model. It writes a raster of crown IDs and a table with each crown's
+area and maximum height.
+
+**What success looks like.** Crown outlines (orange) are drawn over the
+canopy height model, with the tree tops from section 13 (aqua) for
+comparison.
+
+- Outlines follow the visible crown edges and meet along the low ground
+  between crowns.
+- Each large crown gets one outline rather than being split into several.
+- Very small outlines, or outlines drawn inside canopy gaps, deserve a
+  closer look.
+- `treeseg` and `canopymaxima` find their peaks separately, so their
+  counts can differ. This run found
+  `r nrow(data.table::fread(file.path(dir_run, "crown_summary.csv")))`
+  crowns and `r nrow(dt_tops)` tree tops. Crowns with no aqua top inside
+  them show where the two tools disagree.
+
+**Automated checks.** `r fn_check_line("treeseg")`
+
+```{r}
+#| label: treeseg-checks
+#| echo: false
+
+fn_checks("treeseg")
+```
+
+```{r}
+#| label: treeseg-map
+#| fig-height: 7
+
+#1. read the crown raster and turn it into outline paths
+r_crowns = terra::rast(file.path(dir_run, "crown_segments.tif"))
+dt_crowns = data.table::fread(file.path(dir_run, "crown_summary.csv"))
+dt_outlines = fn_outline_paths(r_crowns)
+
+#2. draw the outlines and the tree tops over the canopy height model
+fn_map(df_chm, sprintf("treeseg: %d crowns over the canopy height model", nrow(dt_crowns)), "height (ft)") +
+  ggplot2::geom_path(data = dt_outlines, ggplot2::aes(x = x, y = y, group = path_id), inherit.aes = FALSE, colour = col_orange, linewidth = 0.4) +
+  ggplot2::geom_point(data = dt_tops, ggplot2::aes(x = x, y = y), inherit.aes = FALSE, shape = 21, fill = col_aqua, colour = "white", size = 2.2, stroke = 0.6)
+```
+
+```{r}
+#| label: treeseg-sizes
+#| fig-height: 4
+
+#1. plot crown area against crown height
+#  - very small crowns at low heights are the ones most likely to be
+#    fragments rather than trees
+col_area = grep("CrownArea", names(dt_crowns), value = TRUE)[1]
+ggplot2::ggplot(dt_crowns, ggplot2::aes(x = .data[[col_area]], y = MaxHeight)) +
+  ggplot2::geom_point(colour = col_blue, alpha = 0.7, size = 2) +
+  ggplot2::scale_x_continuous(limits = c(0, NA)) +
+  ggplot2::scale_y_continuous(limits = c(0, NA)) +
+  ggplot2::labs(title = "treeseg: crown size and height", x = paste0("crown area (", col_area, ")"), y = "crown maximum height (ft)") +
+  fn_theme()
+```
+
+# 15. `pipeline`: run tools tile by tile and stitch the results
+
+**Tool and options.**
+`pipeline /pipeline:groundfilter,canopymodel,canopymaxima /input:<tile> /output:pipeline /extent:<tile bounds> /tilesize:100,100 /buffer:20 /cellsize:3 /minht:2 /merge`
+
+`pipeline` splits the input into four 100 x 100 ft tiles, each with a 20
+ft buffer of extra points around it. It runs the three-tool chain on each
+tile and stitches the results back together. The dashed lines mark the
+tile boundaries.
+
+**What success looks like.**
+
+- The stitched canopy map shows no visible seam along the dashed lines.
+- The two difference maps compare the stitched results with the
+  single-run outputs from sections 4 and 6. Both are mostly near zero
+  (grey), with no stripe of strong color along a tile boundary.
+- Tree tops near a boundary appear once, not twice.
+- Every tile and stage in the run-state table shows a finished status.
+- Each tile's grid lines up with the single-run grid (an offset of 0 in
+  the alignment table). When the tile size is not a whole multiple of the
+  cell size, as with 100 ft tiles and 3 ft cells, a tile's grid can sit a
+  fraction of a cell away from the single-run grid. Cells then sample
+  slightly different spots, and the canopy difference map shows scattered
+  large differences at crown edges in the shifted tiles.
+
+**Automated checks.** `r fn_check_line("pipeline")`
+
+```{r}
+#| label: pipeline-checks
+#| echo: false
+
+fn_checks("pipeline")
+```
+
+```{r}
+#| label: pipeline-state
+#| echo: false
+
+#1. tally the run state table by stage and status
+dt_pl_state = data.table::fread(file.path(dir_run, "pipeline", "_processing", "pipeline_state.csv"), colClasses = "character")
+knitr::kable(dt_pl_state[ , .(tiles = data.table::uniqueN(tile)), by = .(stage, status)], col.names = c("Stage", "Status", "Tiles"))
+```
+
+```{r}
+#| label: pipeline-alignment
+#| echo: false
+
+#1. measure how far each tile's canopy grid sits from the single-run
+#   grid, as a fraction of one cell
+#  - the single-run grid is anchored at the tile's left and top edges; an
+#    offset of 0 means the tile's cells line up with it exactly
+r_chm_single = terra::rast(file.path(dir_run, "chm.tif"))
+cell_chm = terra::res(r_chm_single)[1]
+paths_tile_chm = list.files(file.path(dir_run, "pipeline", "_processing"), pattern = "^canopymodel[.]tif$", recursive = TRUE, full.names = TRUE)
+list_align = list()
+for(i in seq_along(paths_tile_chm)) {
+  ext_i = as.vector(terra::ext(terra::rast(paths_tile_chm[i])))
+  offset_x_i = ((ext_i[["xmin"]] - terra::xmin(r_chm_single)) / cell_chm) %% 1
+  offset_y_i = ((terra::ymax(r_chm_single) - ext_i[["ymax"]]) / cell_chm) %% 1
+  list_align[[i]] = data.table::data.table(
+      tile = basename(dirname(paths_tile_chm[i]))
+    , offset_x = round(pmin(offset_x_i, 1 - offset_x_i), 3)
+    , offset_y = round(pmin(offset_y_i, 1 - offset_y_i), 3)
+    )
+  }
+dt_align = data.table::rbindlist(list_align)
+knitr::kable(dt_align, col.names = c("Tile", "x offset (cells)", "y offset (cells)"), caption = "Tile grid alignment with the single-run canopy grid")
+```
+
+```{r}
+#| label: pipeline-figure
+#| fig-height: 5
+
+#1. read the stitched canopy and ground rasters and the combined tree tops
+r_pl_chm = terra::rast(file.path(dir_run, "pipeline", "canopymodel_merged.tif"))
+r_pl_ground = terra::rast(file.path(dir_run, "pipeline", "groundfilter_merged.tif"))
+dt_pl_tops = data.table::fread(file.path(dir_run, "pipeline", "canopymaxima_all.csv"))
+dt_pl_tops[ , x := X - x0]
+dt_pl_tops[ , y := Y - y0]
+
+#2. compare each stitched raster with its single-run counterpart on the
+#   stitched grid
+r_chm_on_pl = terra::resample(r_chm, r_pl_chm, method = "near")
+r_ground_on_pl = terra::resample(r_ground, r_pl_ground, method = "bilinear")
+r_chm_diff = r_pl_chm - r_chm_on_pl
+r_ground_diff_pl = r_pl_ground - r_ground_on_pl
+
+#3. draw the three maps with the tile boundaries dashed
+#  - tiles start at the tile's lower-left corner and are 100 ft on a side
+lines_seams = seq(100, max(tile_width, tile_height) - 1, by = 100)
+fn_add_seams = function(p){
+  p +
+    ggplot2::geom_vline(xintercept = lines_seams, linetype = "dashed", linewidth = 0.4) +
+    ggplot2::geom_hline(yintercept = lines_seams, linetype = "dashed", linewidth = 0.4)
+  }
+p_pl_chm = fn_add_seams(fn_map(fn_df_raster(r_pl_chm), sprintf("Stitched canopy, %d tree tops", nrow(dt_pl_tops)), "height (ft)")) +
+  ggplot2::geom_point(data = dt_pl_tops, ggplot2::aes(x = x, y = y), inherit.aes = FALSE, shape = 21, fill = col_aqua, colour = "white", size = 1.6, stroke = 0.5)
+p_pl_chm_diff = fn_add_seams(fn_map(fn_df_raster(r_chm_diff), "Canopy: stitched minus single run", "ft", scale = "div"))
+p_pl_ground_diff = fn_add_seams(fn_map(fn_df_raster(r_ground_diff_pl), "Ground: stitched minus single run", "ft", scale = "div"))
+patchwork::wrap_plots(p_pl_chm, p_pl_chm_diff, p_pl_ground_diff, ncol = 3) &
+  ggplot2::theme(axis.text = ggplot2::element_blank(), axis.title = ggplot2::element_blank(), legend.position = "bottom")
+```
+
+# Session info
+
+```{r}
+#| label: session-info
+
+sessionInfo()
+```
