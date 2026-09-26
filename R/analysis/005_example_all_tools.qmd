@@ -115,12 +115,17 @@ dt_build = data.table::data.table(
 print(dt_build)
 
 #6. point at the example tile and one external DTM
-#  - the tile is the same 200 x 200 ft USGS 3DEP clip used by scripts
-#    001-004; see 001 for its source and the LAS 1.2 re-encoding
+#  - the tile is a 200 x 200 ft window of closed-canopy forest (92%
+#    canopy cover, 95th-percentile height 142 ft) from lidar tile
+#    TC_1372 (NV5 Geospatial, 2022), kept in its native LAS 1.4 point
+#    format 6 LAZ encoding; see 006 for how the window was chosen.
+#    Every clip box, plot, and elevation band below is placed relative to
+#    this tile's own extent and elevations, so another tile can be swapped
+#    in without editing coordinates
 #  - the external DTM is a real USGS bare-earth raster with a coordinate
 #    system attached, used to check that raster-in/raster-out tools carry
 #    that coordinate system through
-path_las = normalizePath(file.path(dir_lidar_raw, "USGS_LPC_WA_6County_A24_w2049750n409500_clip200ft_las12.las"), winslash = "/")
+path_las = normalizePath(file.path(dir_lidar_raw, "TC_1372_forest200ft.laz"), winslash = "/")
 path_dtm_external = normalizePath(file.path(dir_dtm_raw, "site_grays_harbor", "usgs_lidar_dtm.tif"), winslash = "/")
 if(!file.exists(path_las)) stop("Example lidar tile not found at ", path_las)
 if(!file.exists(path_dtm_external)) stop("External example DTM not found at ", path_dtm_external)
@@ -410,16 +415,19 @@ rule.
 #| label: step-3-filterdata
 
 #1. define the three filters and the rule R uses to reproduce each
+#  - the elevation band is the 20 ft band centred on the tile's median
+#    point elevation, so it always keeps a sizeable share of the points
 dir_filter = file.path(dir_run, "filterdata")
 dir.create(dir_filter, showWarnings = FALSE)
+z_band = round(stats::median(las$Z)) + c(-10, 10)
 dt_filters = data.table::data.table(
-    run  = c("first_returns", "ground_class", "z_780_800")
-  , args = list("/return:1", "/class:2", c("/minz:780", "/maxz:800"))
+    run  = c("first_returns", "ground_class", "z_band")
+  , args = list("/return:1", "/class:2", c(paste0("/minz:", z_band[1]), paste0("/maxz:", z_band[2])))
   )
 fn_filter_rule = function(run, x){
   if(run == "first_returns") return(x$ReturnNumber == 1)
   if(run == "ground_class")  return(x$Classification == 2)
-  x$Z >= 780 & x$Z <= 800
+  x$Z >= z_band[1] & x$Z <= z_band[2]
   }
 
 #2. run each filter and check it
@@ -548,7 +556,13 @@ dir_clip = file.path(dir_run, "clipdata")
 dir.create(dir_clip, showWarnings = FALSE)
 
 #1. clip to a 100 x 100 ft box and check it against R
-box_clip = c(xmin = 2050800, ymin = 410550, xmax = 2050900, ymax = 410650)
+#  - the box starts 25 ft in from the tile's lower-left corner
+box_clip = c(
+    xmin = ext_tile[["xmin"]] + 25
+  , ymin = ext_tile[["ymin"]] + 25
+  , xmax = ext_tile[["xmin"]] + 125
+  , ymax = ext_tile[["ymin"]] + 125
+  )
 arg_box = paste0("/extent:", paste(box_clip[c("xmin", "ymin", "xmax", "ymax")], collapse = ","))
 path_clip_box = file.path(dir_clip, "box.las")
 fn_run_tool(6, "clipdata", c(path_las, paste0("/output:", path_clip_box), arg_box), "clipdata box")
@@ -573,12 +587,14 @@ if(fn_check(6, "clipdata", "box + height: output readable", !is.null(las_clip_ht
   }
 
 #3. build two 30 ft radius circular plots as a shapefile
+#  - centred 50 ft and 150 ft in from the tile's lower-left corner, so
+#    both circles sit wholly inside the tile
 path_plots_shp = file.path(dir_clip, "example_plots.shp")
 sf_plots = sf::st_sf(
     plot_id = c("plotA", "plotB")
   , geometry = sf::st_sfc(
-        sf::st_buffer(sf::st_point(c(2050825, 410575)), 30)
-      , sf::st_buffer(sf::st_point(c(2050925, 410675)), 30)
+        sf::st_buffer(sf::st_point(c(ext_tile[["xmin"]] + 50, ext_tile[["ymin"]] + 50)), 30)
+      , sf::st_buffer(sf::st_point(c(ext_tile[["xmin"]] + 150, ext_tile[["ymin"]] + 150)), 30)
       , crs = sf::st_crs(las)
       )
   )
@@ -727,8 +743,9 @@ if(fn_check_file(8, "returndensity", path_returndensity, "density raster")) {
 `densitymetrics` counts returns in height bands above ground (default
 breaks 0.5, 2, 5, 10, and 20 ft, giving six bands) and writes one raster
 band per stratum. Per cell, the stratum counts should add up to that
-cell's total returns. The top stratum (above 20 ft) should be nearly
-empty on this low-canopy tile.
+cell's total returns. On this forested tile the top stratum (above 20 ft)
+holds most of the canopy returns, so its count against R is a meaningful
+check rather than a comparison of two empty counts.
 
 ```{r}
 #| label: step-9-densitymetrics
@@ -810,11 +827,10 @@ if(fn_check_file(10, "gridmetrics", if(is.na(path_gm_tif)) file.path(dir_gm, "mi
   fn_check_raster_crs(10, "gridmetrics", r_gm, "metrics raster")
 
   #4. list any band that is empty everywhere
-  #  - surface_area_ratio/roughness may legitimately be empty on this
-  #    sparse-canopy tile (see script 001 Step 5), so they're soft
+  #  - on this closed-canopy tile every band, including the surface
+  #    roughness bands, should hold values somewhere
   nms_all_na = dt_gm_overview[n_na == n_cells, band]
-  nms_all_na_unexpected = setdiff(nms_all_na, c("surface_area_ratio", "roughness"))
-  fn_check(10, "gridmetrics", "no band is empty in every cell (other than surface stats)", length(nms_all_na_unexpected) == 0, if(length(nms_all_na_unexpected)) paste(nms_all_na_unexpected, collapse = ";") else "none", "none")
+  fn_check(10, "gridmetrics", "no band is empty in every cell", length(nms_all_na) == 0, if(length(nms_all_na)) paste(nms_all_na, collapse = ";") else "none", "none")
 
   #5. check per-cell return counts against R
   #  - the raster is compared cell-by-cell in row/column order against a
@@ -1177,7 +1193,7 @@ if(fn_check(16, "pipeline", "combined tree tops table written", length(paths_pl_
 This step collects every check from Steps 1-16, prints the failures, and
 saves the full log as a versioned CSV. The chart shows each tool's pass,
 warn, and fail counts at a glance. Each failed `hard` check is a candidate
-for a unit test in `fusion_update/tests/cpp` that reproduces it before the
+for a unit test in `FUSION2/tests/cpp` that reproduces it before the
 fix.
 
 ```{r}

@@ -22,11 +22,20 @@ tool's source history.
 
 ## Data
 
-- `data/raw/lidar/` -- one small (roughly 1 MB) example lidar tile: a
-  200 x 200 ft clip of a public USGS 3DEP point cloud, project
-  `WA_6County_A24`, tile `w2049750n409500`. See
-  `R/analysis/001_example_gridmetrics_lidar_pipeline.qmd` for the full
-  source URL, acquisition date, and the format conversion applied.
+- `data/raw/lidar/` -- two small example lidar tiles:
+  - `USGS_LPC_WA_6County_A24_w2049750n409500_clip200ft_las12.las`
+    (roughly 1 MB): a 200 x 200 ft clip of a public USGS 3DEP point
+    cloud over open, low-vegetation ground, re-encoded as LAS 1.2. Used
+    by scripts 001-004. See
+    `R/analysis/001_example_gridmetrics_lidar_pipeline.qmd` for the full
+    source URL, acquisition date, and the format conversion applied.
+  - `TC_1372_forest200ft.laz` (roughly 0.5 MB): a 200 x 200 ft window of
+    closed-canopy forest (92% canopy cover, 95th-percentile height
+    142 ft, 70,532 points) from lidar tile `TC_1372` (NV5 Geospatial,
+    2022; NAD83(HARN) / Washington South ftUS), kept in its native LAS 1.4
+    point format 6 LAZ encoding. Used by `005_example_all_tools.qmd`.
+    `R/analysis/006_prepare_forested_example_tile.qmd` shows how the
+    window was chosen from the full tile.
 - `data/raw/dnr/` -- a small (15-plot) example subset of two Washington
   DNR forest inventory programs, RSFRIS and SFIS, covering only the
   plot-level and tree-level attribute tables (no coordinate columns). See

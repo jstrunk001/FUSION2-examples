@@ -1,0 +1,225 @@
+---
+title: "Prepare a Forested Example Lidar Tile"
+author: "Jacob Strunk"
+date: today
+format: html
+execute:
+  echo: true
+  warning: false
+  message: false
+---
+
+<!--
+Pipeline script -- downloads one public USGS 3DEP lidar tile, finds its
+most heavily forested 200 x 200 ft window, and clips that window into
+data/raw/lidar/ as the example tile for 005_example_all_tools.qmd. Follows
+the pipeline template (execution-ordered "# Step N" headings).
+-->
+
+# Setup
+
+## Reset working directory to the project root
+
+This script lives in `R/analysis/`, but Quarto runs chunks from the
+`.qmd`'s own folder, so project-relative paths need the working directory
+moved to the project root. The setting takes effect from the next chunk.
+
+```{r}
+#| label: root-dir
+
+knitr::opts_knit$set(root.dir = "../..")
+```
+
+## Load libraries and set paths
+
+```{r}
+#| label: setup
+
+#1. load packages
+library(data.table)
+library(terra)
+library(lidR)
+library(ggplot2)
+
+#2. set the source tile and output locations
+#  - the full tile is large (tens to hundreds of MB) and regenerable, so it
+#    is cached under data/raw/lidar_full_tiles/, which git ignores; only
+#    the small clip written to data/raw/lidar/ is committed
+#  - the tile's download URL comes from the USGS National Map products
+#    service (tnmaccess.nationalmap.gov/api/v1/products, dataset "Lidar
+#    Point Cloud (LPC)") queried at the forest site's coordinates
+#  - a tile that was obtained some other way is used by setting url_tile
+#    to NA and placing the file in data/raw/lidar_full_tiles/ under
+#    name_tile; Step 1 then skips the download
+url_tile = NA
+name_tile = "TC_1372.laz"
+dir_full_tiles = file.path("data", "raw", "lidar_full_tiles")
+dir_lidar_raw = file.path("data", "raw", "lidar")
+dir.create(dir_full_tiles, recursive = TRUE, showWarnings = FALSE)
+if(!is.na(url_tile)) name_tile = basename(url_tile)
+path_full_tile = file.path(dir_full_tiles, name_tile)
+path_forest_clip = file.path(dir_lidar_raw, sub("\\.laz$", "_forest200ft.laz", name_tile))
+
+#3. set the window-selection parameters, in feet
+#  - Step 2 converts them into the tile's own linear unit (feet or metres)
+window_size_ft   = 200   # clip width and height
+cellsize_scan_ft = 10    # grid cell used to score candidate windows
+height_cover_ft  = 6     # a first return above this height counts as canopy
+```
+
+# Step 1: Download the full tile
+
+The tile is fetched once and reused on later runs. A download that stops
+early leaves a truncated file, so the file's size is checked against the
+server's reported size before it is used.
+
+```{r}
+#| label: step-1-download
+
+#1. download the tile if it has a URL and is not already cached
+if(!is.na(url_tile) && !file.exists(path_full_tile)) {
+  utils::download.file(url_tile, path_full_tile, mode = "wb", quiet = TRUE)
+  }
+if(!file.exists(path_full_tile)) stop("Full tile not found at ", path_full_tile)
+
+#2. interrogate: a downloaded file must match the server's size
+if(!is.na(url_tile)) {
+  size_local = file.info(path_full_tile)$size
+  headers_remote = curlGetHeaders(url_tile)
+  line_length = grep("^content-length:", headers_remote, ignore.case = TRUE, value = TRUE)
+  size_remote = as.numeric(gsub("[^0-9]", "", line_length[length(line_length)]))
+  cat("Local size:", size_local, "bytes; server size:", size_remote, "bytes\n")
+  if(size_local != size_remote) stop("Cached tile is incomplete -- delete ", path_full_tile, " and rerun.")
+  }
+```
+
+# Step 2: Grid canopy cover and height across the tile
+
+Heights above ground are computed against a triangulation of the tile's
+own ground points. On a 10 ft grid, each cell gets its canopy cover (the
+share of first returns above 6 ft) and its 95th-percentile height.
+
+```{r}
+#| label: step-2-grid-canopy
+
+#1. read the tile and normalize heights
+las_full = lidR::readLAS(path_full_tile, filter = "-drop_withheld")
+las_full_norm = lidR::normalize_height(las_full, algorithm = lidR::tin())
+
+#2. convert the window parameters into the tile's linear unit
+#  - US survey feet and international feet differ by 2 ppm, which does
+#    not matter at these sizes, so both count as feet
+unit_tile = sf::st_crs(las_full)$units_gdal
+unit_is_feet = grepl("foot|feet|ft", unit_tile, ignore.case = TRUE)
+unit_per_ft = if(unit_is_feet) 1 else 0.3048
+cat("Tile linear unit:", unit_tile, "\n")
+if(!unit_is_feet & !grepl("metre|meter", unit_tile, ignore.case = TRUE)) stop("Unrecognized tile unit: ", unit_tile)
+window_size   = window_size_ft * unit_per_ft
+cellsize_scan = cellsize_scan_ft * unit_per_ft
+height_cover  = height_cover_ft * unit_per_ft
+
+#3. compute per-cell canopy cover and 95th-percentile height
+fn_cell_canopy = function(z, rn){
+  z_first = z[rn == 1]
+  list(
+      cover = if(length(z_first) > 0) mean(z_first > height_cover) else NA_real_
+    , p95   = as.numeric(stats::quantile(z, 0.95))
+    )
+  }
+r_canopy = lidR::pixel_metrics(las_full_norm, ~fn_cell_canopy(Z, ReturnNumber), res = cellsize_scan)
+
+#4. interrogate: the grid must cover the tile and hold plausible heights
+print(r_canopy)
+v_p95 = terra::values(r_canopy[["p95"]])[ , 1]
+cat("95th-percentile height across cells (tile units):\n")
+print(stats::quantile(v_p95, c(0, 0.25, 0.5, 0.75, 1), na.rm = TRUE))
+if(max(v_p95, na.rm = TRUE) > 400 * unit_per_ft) stop("Heights above 400 ft -- normalization failed.")
+```
+
+# Step 3: Score every 200 ft window and pick the most forested one
+
+Every window of 21 x 21 cells (210 ft) is scored by its mean canopy
+cover and mean 95th-percentile height. The scoring window has an odd
+width so it has a true centre cell (`terra::focal` requires this). The
+200 ft clip is then centred on that cell, so it sits wholly inside the
+scored area. Windows that run off the tile or contain empty cells are
+skipped. The chosen window is the tallest one among those with at least
+70% canopy cover.
+
+```{r}
+#| label: step-3-pick-window
+
+#1. average cover and height over every 21 x 21 cell window
+n_cells_window = round(window_size / cellsize_scan) + 1
+kernel = matrix(1, n_cells_window, n_cells_window)
+r_cover_mean = terra::focal(r_canopy[["cover"]], w = kernel, fun = "mean", na.rm = FALSE)
+r_p95_mean   = terra::focal(r_canopy[["p95"]], w = kernel, fun = "mean", na.rm = FALSE)
+
+#2. collect the scored windows and centre a 200 ft clip on each
+dt_windows = data.table::data.table(
+    cell  = seq_len(terra::ncell(r_canopy))
+  , cover = terra::values(r_cover_mean)[ , 1]
+  , p95   = terra::values(r_p95_mean)[ , 1]
+  )
+dt_windows = dt_windows[!is.na(cover) & !is.na(p95)]
+xy_centre = terra::xyFromCell(r_canopy, dt_windows$cell)
+dt_windows[ , xmin := xy_centre[ , 1] - window_size / 2]
+dt_windows[ , ymin := xy_centre[ , 2] - window_size / 2]
+dt_windows[ , xmax := xmin + window_size]
+dt_windows[ , ymax := ymin + window_size]
+
+#3. keep windows fully inside the tile, then take the tallest dense one
+ext_full = terra::ext(r_canopy)
+dt_windows = dt_windows[xmin >= ext_full$xmin & xmax <= ext_full$xmax & ymin >= ext_full$ymin & ymax <= ext_full$ymax]
+dt_dense = dt_windows[cover >= 0.70]
+if(nrow(dt_dense) == 0) stop("No 200 ft window on this tile has 70% canopy cover -- choose another tile.")
+window_best = dt_dense[which.max(p95)]
+print(window_best)
+
+#4. interrogate: map the tile's canopy height with the chosen window
+dt_map = data.table::as.data.table(terra::as.data.frame(r_canopy[["p95"]], xy = TRUE))
+p_window = ggplot2::ggplot(dt_map, ggplot2::aes(x = x, y = y, fill = p95)) +
+  ggplot2::geom_raster() +
+  ggplot2::annotate("rect", xmin = window_best$xmin, xmax = window_best$xmax, ymin = window_best$ymin, ymax = window_best$ymax, fill = NA, colour = "red", linewidth = 1) +
+  ggplot2::scale_fill_viridis_c(name = "95th pct\nheight (ft)") +
+  ggplot2::coord_equal() +
+  ggplot2::labs(title = "Full tile canopy height; red box = chosen example window", x = NULL, y = NULL) +
+  ggplot2::theme_minimal()
+print(p_window)
+```
+
+# Step 4: Clip the window and write the example tile
+
+The window is clipped from the full tile, withheld points included, and
+written as compressed LAZ in the tile's own LAS version and point format,
+so the example exercises the same encoding USGS distributes. The clip's
+own ground points must still be present, since every height-based check
+in 005 depends on them.
+
+```{r}
+#| label: step-4-clip
+
+#1. clip from the unfiltered tile so withheld points stay in the example
+las_source = lidR::readLAS(path_full_tile)
+las_clip = lidR::clip_rectangle(las_source, window_best$xmin, window_best$ymin, window_best$xmax, window_best$ymax)
+lidR::writeLAS(las_clip, path_forest_clip)
+
+#2. interrogate the written clip
+las_check = lidR::readLAS(path_forest_clip)
+las_check_norm = lidR::normalize_height(lidR::filter_poi(las_check, !Withheld_flag), algorithm = lidR::tin())
+dt_clip_summary = data.table::data.table(
+    n_points     = lidR::npoints(las_check)
+  , n_ground     = sum(las_check$Classification == 2)
+  , n_withheld   = sum(las_check$Withheld_flag)
+  , cover        = mean(las_check_norm$Z[las_check_norm$ReturnNumber == 1] > height_cover)
+  , height_p95   = as.numeric(stats::quantile(las_check_norm$Z, 0.95))
+  , height_max   = max(las_check_norm$Z)
+  , las_version  = paste0(las_check@header$`Version Major`, ".", las_check@header$`Version Minor`)
+  , point_format = las_check@header$`Point Data Format ID`
+  , file_mb      = round(file.info(path_forest_clip)$size / 1e6, 2)
+  )
+print(dt_clip_summary)
+if(dt_clip_summary$n_ground < 100) stop("Clip has fewer than 100 ground points -- heights cannot be normalized reliably.")
+if(is.na(sf::st_crs(las_check))) stop("Clip lost its coordinate system.")
+if(dt_clip_summary$file_mb > 5) warning("Clip is larger than 5 MB -- consider a smaller window before committing it.")
+```
