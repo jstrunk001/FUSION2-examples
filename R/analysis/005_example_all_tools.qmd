@@ -434,7 +434,7 @@ for(i in seq_len(nrow(dt_filters))) {
   if(fn_check(3, "filterdata", paste0(run_i, ": output readable"), !is.null(las_out_i), if(is.null(las_out_i)) "unreadable" else "ok", "ok")) {
     fn_check(3, "filterdata", paste0(run_i, ": kept count matches R"), lidR::npoints(las_out_i) == n_expected_i, lidR::npoints(las_out_i), n_expected_i)
     fn_check(3, "filterdata", paste0(run_i, ": every kept point satisfies the filter"), all(fn_filter_rule(run_i, las_out_i)), sum(!fn_filter_rule(run_i, las_out_i)), "0 violations")
-    fn_check(3, "filterdata", paste0(run_i, ": coordinate system kept"), !is.na(sf::st_crs(las_out_i)), if(is.na(sf::st_crs(las_out_i))) "none" else "present", "present", severity = "soft")
+    fn_check(3, "filterdata", paste0(run_i, ": coordinate system kept"), !is.na(sf::st_crs(las_out_i)), if(is.na(sf::st_crs(las_out_i))) "none" else "present", "present")
     fn_check(3, "filterdata", paste0(run_i, ": withheld points dropped"), sum(las_out_i$Withheld_flag) == 0, sum(las_out_i$Withheld_flag), 0, severity = "soft")
     }
   }
@@ -736,7 +736,10 @@ empty on this low-canopy tile.
 #1. run densitymetrics with the FUSION2 ground DEM
 dir_dm = file.path(dir_run, "densitymetrics")
 dir.create(dir_dm, showWarnings = FALSE)
-fn_run_tool(9, "densitymetrics", c(path_las, path_ground_dem, paste0("/outdir:", dir_dm), "/output:dm", "/cellsize:10"), "densitymetrics")
+#  - /output-table asks for the per-cell CSV that step 3 below checks;
+#    densitymetrics writes no table unless it is given
+path_dm_csv = file.path(dir_dm, "dm_densitymetrics.csv")
+fn_run_tool(9, "densitymetrics", c(path_las, path_ground_dem, paste0("/outdir:", dir_dm), "/output:dm", "/cellsize:10", paste0("/output-table:", path_dm_csv)), "densitymetrics")
 
 #2. overview and placement of the raster
 path_dm_tif = list.files(dir_dm, pattern = "\\.tif$", full.names = TRUE)[1]
@@ -748,10 +751,9 @@ if(fn_check_file(9, "densitymetrics", if(is.na(path_dm_tif)) file.path(dir_dm, "
   }
 
 #3. check the per-cell CSV table
-#  - newer builds write it only when /output-table is given; the check
-#    is skipped with a note if no CSV appears
-path_dm_csv = list.files(dir_dm, pattern = "\\.csv$", full.names = TRUE)[1]
-if(!is.na(path_dm_csv)) {
+#  - the table was requested with /output-table in step 1, so a missing
+#    file is a hard failure, and the content checks below must all run
+if(fn_check(9, "densitymetrics", "per-cell CSV table written", file.exists(path_dm_csv), if(file.exists(path_dm_csv)) "present" else "none", "present")) {
   dt_dm = data.table::fread(path_dm_csv)
   nms_strata_cnt = grep("^StrataCnt_", names(dt_dm), value = TRUE)
   stratum_sum = rowSums(dt_dm[ , ..nms_strata_cnt])
@@ -763,8 +765,6 @@ if(!is.na(path_dm_csv)) {
   n_top_expected = sum(height_above_fusion_ground > 20, na.rm = TRUE)
   n_top_observed = sum(dt_dm[[nms_strata_cnt[length(nms_strata_cnt)]]])
   fn_check(9, "densitymetrics", "top stratum (> 20 ft) count matches R (within 5 points)", abs(n_top_observed - n_top_expected) <= 5, n_top_observed, n_top_expected)
-  } else {
-  fn_check(9, "densitymetrics", "per-cell CSV table written", FALSE, "none", "one CSV", severity = "soft")
   }
 ```
 
