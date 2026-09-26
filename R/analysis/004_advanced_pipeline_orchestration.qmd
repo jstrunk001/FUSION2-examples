@@ -37,9 +37,9 @@ knitr::opts_knit$set(root.dir = "../..")
 ```{r}
 #| label: setup
 
-# data.table for state-manifest parsing and summary tables; RForInvt for
+# data.table for parsing the state tracking file and summary tables; RForInvt for
 # output versioning. No raster-reading package is needed here -- every
-# step in this script inspects the state manifest and console output
+# step in this script inspects the state tracking file and console output
 # directly rather than the rasters themselves (003 already covers that).
 library(data.table)
 library(RForInvt)
@@ -126,7 +126,7 @@ fn_run_cmd = function(cmd, run_label){
     )
   }
 
-#2. define a helper that reads a pipeline.exe run's state manifest
+#2. define a helper that reads a pipeline.exe run's state tracking file
 #   (_processing/pipeline_state.csv) into a data.table, returning an empty
 #   0-row table with the expected columns if the run never got far enough
 #   to write one
@@ -250,12 +250,12 @@ print(fn_read_pipeline_state(dir_single_out))
 Per `docs/PIPELINE_GUIDE.md` Section 8, re-running the exact same command
 should be safe and cheap: any tile/stage already recorded `done` (with its
 output file still present) is skipped. This step reruns Step 3's exact
-command unchanged and compares the two state manifests.
+command unchanged and compares the two state tracking files.
 
 ```{r}
 #| label: step-4-resume
 
-#1. capture the state manifest's finished_at timestamps before the rerun
+#1. capture the state tracking file's finished_at timestamps before the rerun
 dt_state_before_rerun = fn_read_pipeline_state(dir_single_out)
 
 #2. rerun the identical command from Step 3

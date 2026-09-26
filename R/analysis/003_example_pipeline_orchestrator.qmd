@@ -44,7 +44,7 @@ knitr::opts_knit$set(root.dir = "../..")
 ```{r}
 #| label: setup
 
-# data.table for state-manifest parsing and summary tables; terra for
+# data.table for parsing the state tracking file and summary tables; terra for
 # reading back GeoTIFF/VRT results; RForInvt for output versioning.
 library(data.table)
 library(terra)
@@ -131,7 +131,7 @@ fn_run_cmd = function(cmd, run_label){
     )
   }
 
-#2. define a helper that reads a pipeline.exe run's state manifest
+#2. define a helper that reads a pipeline.exe run's state tracking file
 #   (_processing/pipeline_state.csv) into a data.table, returning an empty
 #   0-row table with the expected columns if the run never got far enough
 #   to write one
@@ -396,7 +396,7 @@ if(file.exists(path_gf_vrt) && file.exists(path_cm_vrt)){
   cat("Tree tops detected:", nrow(dt_treetops), "\n")
 } else {
   cat("Step 6 did not produce groundfilter.vrt / canopymodel.vrt -- see the\n")
-  cat("captured console output and state manifest above for why.\n")
+  cat("captured console output and state tracking file above for why.\n")
   }
 ```
 
@@ -429,7 +429,7 @@ if(file.exists(path_treeseg_vrt)){
   dt_crowns = if(file.exists(path_treeseg_csv)) data.table::fread(path_treeseg_csv) else data.table::data.table()
   cat("Crowns segmented:", nrow(dt_crowns), "\n")
 } else {
-  cat("Step 7 did not produce treeseg.vrt -- see console output and state manifest above.\n")
+  cat("Step 7 did not produce treeseg.vrt -- see console output and state tracking file above.\n")
   }
 ```
 
@@ -459,7 +459,7 @@ path_topo_vrt = file.path(dir_terrain_out, "topometrics.vrt")
 if(file.exists(path_topo_vrt)){
   print(fn_summarize_raster(path_topo_vrt, "slope"))
 } else {
-  cat("Step 8 did not produce topometrics.vrt -- see console output and state manifest above.\n")
+  cat("Step 8 did not produce topometrics.vrt -- see console output and state tracking file above.\n")
   }
 ```
 
