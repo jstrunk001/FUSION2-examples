@@ -235,7 +235,8 @@ fn_contour_step = function(values){
 # Run under review
 
 ```{r}
-#| label: locate-run
+#| label: tbl-run-info
+#| tbl-cap: "Run under review: the 005 run folder, its check log, the tile, and the FUSION2 build tested."
 #| echo: false
 
 #1. pick the run folder: the parameter if given, otherwise the newest
@@ -330,7 +331,8 @@ knitr::kable(dt_run_info, col.names = c("", ""))
 ## Check results by tool
 
 ```{r}
-#| label: check-tally
+#| label: tbl-check-tally
+#| tbl-cap: "Automated check results by tool, in the order 005 ran the tools."
 #| echo: false
 
 #1. count results per tool, in the order the tools ran
@@ -349,13 +351,18 @@ knitr::kable(dt_tally, col.names = c("Tool", "Checks", "Passed", "Warnings", "Fa
 #| echo: false
 #| results: asis
 
-#1. list any check that did not pass, or say there were none
+#1. say whether every check passed; if not, list the failures in a
+#   numbered table
+#  - the table is written as a Quarto table block (::: {#tbl-...}) rather
+#    than a labelled chunk, so it only takes a table number when it exists
 dt_not_passed = dt_checks[result != "pass", .(tool, check, observed, expected, result)]
 if(nrow(dt_not_passed) == 0) {
   cat("Every check in this run passed.\n")
   } else {
-  cat("**Checks that did not pass:**\n\n")
-  print(knitr::kable(dt_not_passed, col.names = c("Tool", "Check", "Observed", "Expected", "Result")))
+  cat(nrow(dt_not_passed), "checks did not pass; @tbl-check-failures lists them.\n\n")
+  cat("::: {#tbl-check-failures}\n\n")
+  cat(knitr::kable(dt_not_passed, format = "pipe", col.names = c("Tool", "Check", "Observed", "Expected", "Result")), sep = "\n")
+  cat("\n\nChecks that did not pass.\n\n:::\n")
   }
 ```
 
@@ -376,21 +383,23 @@ ft cell.
 - Cell counts are fairly even across the tile. Stripes or empty cells
   inside the tile would point to missing flight lines or a gridding error.
 
-005's checks confirm that the raster's cells add up to the point count,
-but not where the raster is placed. The figure code below checks the
-placement and states the result.
+005 checks the raster's placement, coordinate system, and total count.
+The map below draws the raster where it actually sits, so a misplaced
+raster is visible here as well as in the checks.
 
 **Automated checks.** `r fn_check_line("catalog")`
 
 ```{r}
-#| label: catalog-checks
+#| label: tbl-catalog-checks
+#| tbl-cap: "catalog: automated checks recorded by 005."
 #| echo: false
 
 fn_checks("catalog")
 ```
 
 ```{r}
-#| label: catalog-figure
+#| label: fig-catalog-density
+#| fig-cap: "catalog: points per 10 ft cell from the /density raster, with the CSV report's bounding box outlined when the raster sits on the tile."
 #| fig-height: 5.5
 
 #1. read the CSV report and the density raster
@@ -438,7 +447,7 @@ if(catalog_on_tile & catalog_has_crs) {
   cat("The density raster sits on the tile's coordinates and carries a coordinate system.\n")
   } else {
   cat("::: {.callout-warning}\n")
-  if(!catalog_on_tile) cat("**catalog.tif is not placed on the tile.** Its extent starts at the grid origin (0, 0) rather than at the tile's coordinates, so it will not line up with the tile in GIS software. None of 005's checks test this.\n\n")
+  if(!catalog_on_tile) cat("**catalog.tif is not placed on the tile.** Its extent starts at the grid origin (0, 0) rather than at the tile's coordinates, so it will not line up with the tile in GIS software.\n\n")
   if(!catalog_has_crs) cat("**catalog.tif has no coordinate system attached.**\n")
   cat(":::\n")
   }
@@ -466,14 +475,16 @@ tile and blue points are what each filter kept.
 **Automated checks.** `r fn_check_line("filterdata")`
 
 ```{r}
-#| label: filterdata-checks
+#| label: tbl-filterdata-checks
+#| tbl-cap: "filterdata: automated checks recorded by 005."
 #| echo: false
 
 fn_checks("filterdata")
 ```
 
 ```{r}
-#| label: filterdata-figure
+#| label: fig-filterdata-strip
+#| fig-cap: "filterdata: points kept by each filter (blue) over all points in the side-view strip (grey)."
 #| fig-height: 7.5
 
 #1. read the three filtered files and keep the side-view strip of each
@@ -526,14 +537,16 @@ points are the ones kept.
 **Automated checks.** `r fn_check_line("thindata")`
 
 ```{r}
-#| label: thindata-checks
+#| label: tbl-thindata-checks
+#| tbl-cap: "thindata: automated checks recorded by 005."
 #| echo: false
 
 fn_checks("thindata")
 ```
 
 ```{r}
-#| label: thindata-figure
+#| label: fig-thindata-window
+#| fig-cap: "thindata: points kept (orange) and original points (grey) in a 20 x 20 ft window, with the 2 ft thinning grid."
 #| fig-height: 6.5
 
 #1. read the thinned file
@@ -589,14 +602,16 @@ reports height above ground uses this surface.
 **Automated checks.** `r fn_check_line("groundfilter")`
 
 ```{r}
-#| label: groundfilter-checks
+#| label: tbl-groundfilter-checks
+#| tbl-cap: "groundfilter: automated checks recorded by 005."
 #| echo: false
 
 fn_checks("groundfilter")
 ```
 
 ```{r}
-#| label: groundfilter-map
+#| label: fig-groundfilter-map
+#| fig-cap: "groundfilter: ground elevation with contour lines."
 #| fig-height: 6
 
 #1. read the ground surface and map it with contour lines
@@ -610,7 +625,8 @@ fn_map(df_ground, sprintf("groundfilter: ground elevation with %s ft contours", 
 ```
 
 ```{r}
-#| label: groundfilter-profile
+#| label: fig-groundfilter-profile
+#| fig-cap: "groundfilter: FUSION2 and lidR reference ground surfaces along the side-view strip, with the points written as ground."
 #| fig-height: 5
 
 #1. build the independent lidR reference ground surface on the same 5 ft
@@ -653,7 +669,8 @@ ggplot2::ggplot() +
 ```
 
 ```{r}
-#| label: groundfilter-compare
+#| label: fig-groundfilter-compare
+#| fig-cap: "groundfilter: FUSION2 ground against the lidR reference, cell by cell (left) and as a difference map (right)."
 #| fig-height: 5
 
 #1. pair each FUSION2 ground cell with the reference cell at the same spot
@@ -705,14 +722,16 @@ patchwork::wrap_plots(p_scatter, p_diff, ncol = 2)
 **Automated checks.** `r fn_check_line("clipdata")`
 
 ```{r}
-#| label: clipdata-checks
+#| label: tbl-clipdata-checks
+#| tbl-cap: "clipdata: automated checks recorded by 005."
 #| echo: false
 
 fn_checks("clipdata")
 ```
 
 ```{r}
-#| label: clipdata-maps
+#| label: fig-clipdata-maps
+#| fig-cap: "clipdata: box and per-plot clips over the tile (left), and everything outside the plots (right)."
 #| fig-height: 5.5
 
 #1. read the clip outputs
@@ -765,7 +784,8 @@ patchwork::wrap_plots(p_inside, p_outside, ncol = 2)
 ```
 
 ```{r}
-#| label: clipdata-height
+#| label: fig-clipdata-height
+#| fig-cap: "clipdata: the height-limited clip through the box, in height above ground."
 #| fig-height: 4.5
 
 #1. read the height-limited clip and express both clips as height above
@@ -819,14 +839,16 @@ ggplot2::ggplot() +
 **Automated checks.** `r fn_check_line("canopymodel")`
 
 ```{r}
-#| label: canopymodel-checks
+#| label: tbl-canopymodel-checks
+#| tbl-cap: "canopymodel: automated checks recorded by 005."
 #| echo: false
 
 fn_checks("canopymodel")
 ```
 
 ```{r}
-#| label: canopymodel-maps
+#| label: fig-canopymodel-maps
+#| fig-cap: "canopymodel: plain, smoothed, and slope-adjusted canopy height models on one height scale."
 #| fig-height: 4.5
 
 #1. read the three canopy models and stack them into one table
@@ -850,7 +872,8 @@ fn_map(df_chm_all, "canopymodel: canopy height, three versions", "height (ft)") 
 ```
 
 ```{r}
-#| label: canopymodel-profile
+#| label: fig-canopymodel-profile
+#| fig-cap: "canopymodel: plain and smoothed canopy surfaces over the points in the side-view strip."
 #| fig-height: 4.5
 
 #1. express the strip's points as height above the FUSION2 ground
@@ -891,14 +914,16 @@ and the percent of returns that are first returns.
 **Automated checks.** `r fn_check_line("returndensity")`
 
 ```{r}
-#| label: returndensity-checks
+#| label: tbl-returndensity-checks
+#| tbl-cap: "returndensity: automated checks recorded by 005."
 #| echo: false
 
 fn_checks("returndensity")
 ```
 
 ```{r}
-#| label: returndensity-maps
+#| label: fig-returndensity-maps
+#| fig-cap: "returndensity: point density (left) and first-return percent (right)."
 #| fig-height: 4.5
 
 #1. read both bands
@@ -930,14 +955,16 @@ per-cell table.
 **Automated checks.** `r fn_check_line("densitymetrics")`
 
 ```{r}
-#| label: densitymetrics-checks
+#| label: tbl-densitymetrics-checks
+#| tbl-cap: "densitymetrics: automated checks recorded by 005."
 #| echo: false
 
 fn_checks("densitymetrics")
 ```
 
 ```{r}
-#| label: densitymetrics-figure
+#| label: fig-densitymetrics
+#| fig-cap: "densitymetrics: returns per height layer for the whole tile (top) and each cell's share of returns by layer (bottom)."
 #| fig-height: 7
 
 #1. name the six layers by their height limits
@@ -996,14 +1023,16 @@ section 4. Six representative bands are shown below.
 **Automated checks.** `r fn_check_line("gridmetrics")`
 
 ```{r}
-#| label: gridmetrics-checks
+#| label: tbl-gridmetrics-checks
+#| tbl-cap: "gridmetrics: automated checks recorded by 005."
 #| echo: false
 
 fn_checks("gridmetrics")
 ```
 
 ```{r}
-#| label: gridmetrics-maps
+#| label: fig-gridmetrics-maps
+#| fig-cap: "gridmetrics: six representative metric bands, each on its own scale."
 #| fig-height: 6
 
 #1. choose six bands that summarize height, cover, density, and intensity
@@ -1043,14 +1072,16 @@ patchwork::wrap_plots(list_gm_maps, ncol = 3)
 **Automated checks.** `r fn_check_line("cloudmetrics")`
 
 ```{r}
-#| label: cloudmetrics-checks
+#| label: tbl-cloudmetrics-checks
+#| tbl-cap: "cloudmetrics: automated checks recorded by 005."
 #| echo: false
 
 fn_checks("cloudmetrics")
 ```
 
 ```{r}
-#| label: cloudmetrics-table
+#| label: tbl-cloudmetrics-summary
+#| tbl-cap: "cloudmetrics: headline metrics for the whole tile and each plot."
 #| echo: false
 
 #1. stack the tile row and the plot rows with a common label
@@ -1065,7 +1096,8 @@ knitr::kable(dt_cm[ , ..nms_cm_show], digits = 1, format.args = list(big.mark = 
 ```
 
 ```{r}
-#| label: cloudmetrics-figure
+#| label: fig-cloudmetrics-percentiles
+#| fig-cap: "cloudmetrics: height percentiles for the whole tile and each plot."
 #| fig-height: 4.5
 
 #1. reshape the height percentiles to one row per area and percentile
@@ -1094,18 +1126,22 @@ ggplot2::ggplot(dt_pct, ggplot2::aes(x = percentile, y = height, colour = Label)
 
 - `topometrics ground_dem.tif /output:topometrics_ground.tif` -- on the
   ground surface from section 4.
-- `topometrics <external DTM> /output:topometrics_external_dtm.tif` -- on
-  a separate USGS bare-earth raster from the Grays Harbor example site.
-  This run tests that the tool keeps the input's coordinate system. That
-  site is not the example tile, so its map does not line up with the other
-  figures.
+- `topometrics <USGS DTM> /output:topometrics_external_dtm.tif` -- on a
+  USGS 3DEP bare-earth DTM of the same ground, extending 50 ft past the
+  tile on every side (fetched by 006 Step 5). This run tests that the tool
+  keeps an input raster's coordinate system.
 
 **What success looks like.** Color shows slope, and the arrows point in
-the direction each slope faces (downhill).
+the direction each slope faces (downhill). Both maps share one slope
+scale, so their colors can be compared directly.
 
 - Arrows cross the contour lines at right angles and point from high
   ground to low ground.
 - Steeper colors appear where the contours bunch together.
+- Inside the dashed square, the two maps show the same broad pattern of
+  higher and lower slope. The USGS DTM comes from an independent
+  bare-earth model at 3 ft cells, so it is smoother in places and sharper
+  in others; broad agreement is the goal, not an exact match.
 - On nearly flat ground, small bumps in the ground surface can show up as
   square rings of higher slope, one or two cells across. These follow the
   ground surface's own cells and may come from how it was interpolated,
@@ -1117,14 +1153,16 @@ the direction each slope faces (downhill).
 **Automated checks.** `r fn_check_line("topometrics")`
 
 ```{r}
-#| label: topometrics-checks
+#| label: tbl-topometrics-checks
+#| tbl-cap: "topometrics: automated checks recorded by 005."
 #| echo: false
 
 fn_checks("topometrics")
 ```
 
 ```{r}
-#| label: topometrics-maps
+#| label: fig-topometrics-maps
+#| fig-cap: "topometrics: slope with downhill arrows and contours, from the FUSION2 ground surface (left) and the USGS 3DEP DTM of the same ground (right). The dashed square marks the tile."
 #| fig-height: 5.5
 
 #1. define a helper that draws one slope map with downhill arrows
@@ -1132,29 +1170,39 @@ fn_checks("topometrics")
 #    the slope is over 2 degrees, since aspect is unstable on flat ground
 #  - the tool reports aspect as a compass bearing (0 = north, clockwise);
 #    ggplot's arrow angle is measured from east, counterclockwise
-fn_slope_map = function(path_topo, path_dem, title, x_origin, y_origin, n_arrows){
+fn_slope_map = function(path_topo, path_dem, title, n_arrows, slope_limits){
   r_topo = terra::rast(path_topo)
-  df_slope = fn_df_raster(r_topo, "slope_degrees", x_origin, y_origin)
-  df_dem = fn_df_raster(terra::rast(path_dem), 1, x_origin, y_origin)
+  df_slope = fn_df_raster(r_topo, "slope_degrees")
+  df_dem = fn_df_raster(terra::rast(path_dem))
   dt_arrows = data.table::as.data.table(terra::spatSample(r_topo, size = n_arrows, method = "regular", xy = TRUE, na.rm = TRUE))
   dt_arrows = dt_arrows[slope_degrees > 2]
-  dt_arrows[ , x := x - x_origin]
-  dt_arrows[ , y := y - y_origin]
+  dt_arrows[ , x := x - x0]
+  dt_arrows[ , y := y - y0]
   dt_arrows[ , angle := (90 - aspect_degrees) * pi / 180]
   arrow_length = 0.6 * (max(df_slope$x) - min(df_slope$x)) / sqrt(n_arrows)
   contour_step = fn_contour_step(df_dem$value)
-  fn_map(df_slope, title, "slope (degrees)") +
+  fn_map(df_slope, title, "slope (degrees)", limits = slope_limits) +
     ggplot2::geom_contour(data = df_dem[!is.na(value)], ggplot2::aes(x = x, y = y, z = value), binwidth = contour_step, colour = "white", linewidth = 0.3, inherit.aes = FALSE) +
     ggplot2::geom_spoke(data = dt_arrows, ggplot2::aes(x = x, y = y, angle = angle), radius = arrow_length, colour = col_orange, linewidth = 0.5, arrow = grid::arrow(length = grid::unit(0.08, "cm")), inherit.aes = FALSE)
   }
 
-#2. map the ground-surface run and the external-DTM run
-#  - the external DTM is drawn in feet from its own lower-left corner
-path_dtm_external = file.path("data", "raw", "lidar_dtm_examples", "site_grays_harbor", "usgs_lidar_dtm.tif")
-ext_external = terra::ext(terra::rast(path_dtm_external))
-p_topo_ground = fn_slope_map(file.path(dir_run, "topometrics_ground.tif"), file.path(dir_run, "ground_dem.tif"), "Tile ground surface", x0, y0, 225)
-p_topo_external = fn_slope_map(file.path(dir_run, "topometrics_external_dtm.tif"), path_dtm_external, "External USGS DTM (different site)", ext_external$xmin, ext_external$ymin, 400)
-patchwork::wrap_plots(p_topo_ground, p_topo_external, ncol = 2)
+#2. set one slope scale covering both runs
+#  - the USGS DTM path must match the one 005 used
+path_dtm_external = file.path("data", "raw", "lidar_dtm_examples", "site_tc_1372_forest", "usgs_3dep_dtm.tif")
+path_topo_ground = file.path(dir_run, "topometrics_ground.tif")
+path_topo_external = file.path(dir_run, "topometrics_external_dtm.tif")
+slope_max = max(
+    terra::global(terra::rast(path_topo_ground)[["slope_degrees"]], "max", na.rm = TRUE)[[1]]
+  , terra::global(terra::rast(path_topo_external)[["slope_degrees"]], "max", na.rm = TRUE)[[1]]
+  )
+
+#3. map both runs in feet from the tile corner, outlining the tile on the
+#   larger USGS DTM
+dt_tile_outline = data.table::data.table(xmin = 0, xmax = tile_width, ymin = 0, ymax = tile_height)
+p_topo_ground = fn_slope_map(path_topo_ground, file.path(dir_run, "ground_dem.tif"), "FUSION2 ground surface", 225, c(0, slope_max))
+p_topo_external = fn_slope_map(path_topo_external, path_dtm_external, "USGS 3DEP DTM, same ground", 225, c(0, slope_max)) +
+  ggplot2::geom_rect(data = dt_tile_outline, ggplot2::aes(xmin = xmin, xmax = xmax, ymin = ymin, ymax = ymax), inherit.aes = FALSE, fill = NA, colour = "black", linetype = "dashed", linewidth = 0.5)
+patchwork::wrap_plots(p_topo_ground, p_topo_external, ncol = 2, guides = "collect")
 ```
 
 # 12. `gridsurfacestats`: surface roughness
@@ -1185,14 +1233,16 @@ reference surface. It writes three bands:
 **Automated checks.** `r fn_check_line("gridsurfacestats")`
 
 ```{r}
-#| label: gridsurfacestats-checks
+#| label: tbl-gridsurfacestats-checks
+#| tbl-cap: "gridsurfacestats: automated checks recorded by 005."
 #| echo: false
 
 fn_checks("gridsurfacestats")
 ```
 
 ```{r}
-#| label: gridsurfacestats-maps
+#| label: fig-gridsurfacestats-maps
+#| fig-cap: "gridsurfacestats: surface area ratio, roughness, and volume difference between the canopy and its smoothed version."
 #| fig-height: 4
 
 #1. read the three bands and map each on its own scale
@@ -1225,14 +1275,16 @@ reports each as a tree top with its location and height.
 **Automated checks.** `r fn_check_line("canopymaxima")`
 
 ```{r}
-#| label: canopymaxima-checks
+#| label: tbl-canopymaxima-checks
+#| tbl-cap: "canopymaxima: automated checks recorded by 005."
 #| echo: false
 
 fn_checks("canopymaxima")
 ```
 
 ```{r}
-#| label: canopymaxima-figure
+#| label: fig-canopymaxima-tops
+#| fig-cap: "canopymaxima: tree tops over the canopy height model."
 #| fig-height: 7
 
 #1. read the tree tops and place them in feet from the corner
@@ -1274,14 +1326,16 @@ comparison.
 **Automated checks.** `r fn_check_line("treeseg")`
 
 ```{r}
-#| label: treeseg-checks
+#| label: tbl-treeseg-checks
+#| tbl-cap: "treeseg: automated checks recorded by 005."
 #| echo: false
 
 fn_checks("treeseg")
 ```
 
 ```{r}
-#| label: treeseg-map
+#| label: fig-treeseg-map
+#| fig-cap: "treeseg: crown outlines (orange) and canopymaxima tree tops (aqua) over the canopy height model."
 #| fig-height: 7
 
 #1. read the crown raster and turn it into outline paths
@@ -1296,7 +1350,8 @@ fn_map(df_chm, sprintf("treeseg: %d crowns over the canopy height model", nrow(d
 ```
 
 ```{r}
-#| label: treeseg-sizes
+#| label: fig-treeseg-sizes
+#| fig-cap: "treeseg: crown area against crown maximum height."
 #| fig-height: 4
 
 #1. plot crown area against crown height
@@ -1339,14 +1394,16 @@ tile boundaries.
 **Automated checks.** `r fn_check_line("pipeline")`
 
 ```{r}
-#| label: pipeline-checks
+#| label: tbl-pipeline-checks
+#| tbl-cap: "pipeline: automated checks recorded by 005."
 #| echo: false
 
 fn_checks("pipeline")
 ```
 
 ```{r}
-#| label: pipeline-state
+#| label: tbl-pipeline-state
+#| tbl-cap: "pipeline: tiles in each stage and status, from the run state table."
 #| echo: false
 
 #1. tally the run state table by stage and status
@@ -1355,7 +1412,8 @@ knitr::kable(dt_pl_state[ , .(tiles = data.table::uniqueN(tile)), by = .(stage, 
 ```
 
 ```{r}
-#| label: pipeline-alignment
+#| label: tbl-pipeline-alignment
+#| tbl-cap: "pipeline: how far each tile's canopy grid sits from the single-run grid, as a fraction of one cell (0 = aligned)."
 #| echo: false
 
 #1. measure how far each tile's canopy grid sits from the single-run
@@ -1377,11 +1435,12 @@ for(i in seq_along(paths_tile_chm)) {
     )
   }
 dt_align = data.table::rbindlist(list_align)
-knitr::kable(dt_align, col.names = c("Tile", "x offset (cells)", "y offset (cells)"), caption = "Tile grid alignment with the single-run canopy grid")
+knitr::kable(dt_align, col.names = c("Tile", "x offset (cells)", "y offset (cells)"))
 ```
 
 ```{r}
-#| label: pipeline-figure
+#| label: fig-pipeline-maps
+#| fig-cap: "pipeline: stitched canopy with tree tops (left), and differences from the single-run canopy (middle) and ground (right). Dashed lines mark tile boundaries."
 #| fig-height: 5
 
 #1. read the stitched canopy and ground rasters and the combined tree tops
@@ -1412,6 +1471,96 @@ p_pl_chm_diff = fn_add_seams(fn_map(fn_df_raster(r_chm_diff), "Canopy: stitched 
 p_pl_ground_diff = fn_add_seams(fn_map(fn_df_raster(r_ground_diff_pl), "Ground: stitched minus single run", "ft", scale = "div"))
 patchwork::wrap_plots(p_pl_chm, p_pl_chm_diff, p_pl_ground_diff, ncol = 3) &
   ggplot2::theme(axis.text = ggplot2::element_blank(), axis.title = ggplot2::element_blank(), legend.position = "bottom")
+```
+
+```{=html}
+<!--
+List of figures and tables in the right-hand margin. Quarto numbers every
+chunk labelled fig-* or tbl-* and wraps it in a div with that id; this
+script collects those divs after the page loads and lists them, linked,
+in the margin column Quarto leaves empty when the table of contents sits
+on the left. The entry for the figure or table on screen is highlighted.
+-->
+<style>
+  #lof-pane { position: sticky; top: 1rem; max-height: calc(100vh - 2rem); overflow-y: auto; font-size: 0.8rem; padding-left: 0.5rem; border-left: 1px solid #dee2e6; }
+  #lof-pane h2 { font-size: 0.85rem; font-weight: 600; margin: 0.8rem 0 0.3rem 0; text-transform: uppercase; letter-spacing: 0.03em; color: #52514e; border: none; }
+  #lof-pane ol { list-style: none; padding-left: 0; margin: 0; }
+  #lof-pane li { margin: 0.15rem 0; line-height: 1.25; }
+  #lof-pane a { color: #52514e; text-decoration: none; display: block; padding: 0.1rem 0.3rem; border-radius: 3px; }
+  #lof-pane a:hover { color: #0b0b0b; background: #f0efec; }
+  #lof-pane a.lof-active { color: #0b0b0b; background: #e6eefb; font-weight: 600; }
+  #lof-pane .lof-num { font-weight: 600; margin-right: 0.25rem; }
+</style>
+<script>
+document.addEventListener("DOMContentLoaded", function () {
+  var sidebar = document.getElementById("quarto-margin-sidebar");
+  if (!sidebar) return;
+
+  // 1. collect numbered figures and tables, in page order
+  function collect(prefix) {
+    var items = [];
+    document.querySelectorAll("div.quarto-float[id^='" + prefix + "']").forEach(function (el) {
+      var cap = el.querySelector("figcaption");
+      if (!cap) return;
+      var text = cap.textContent.replace(/\s+/g, " ").trim();
+      var match = text.match(/^(Figure|Table)\s+(\d+):\s*(.*)$/);
+      items.push({ id: el.id, num: match ? match[2] : "", text: match ? match[3] : text });
+    });
+    return items;
+  }
+
+  // 2. build one titled, linked list
+  function buildList(title, label, items) {
+    if (items.length === 0) return null;
+    var frag = document.createDocumentFragment();
+    var h = document.createElement("h2");
+    h.textContent = title;
+    frag.appendChild(h);
+    var ol = document.createElement("ol");
+    items.forEach(function (item) {
+      var li = document.createElement("li");
+      var a = document.createElement("a");
+      a.href = "#" + item.id;
+      a.title = label + " " + item.num + ": " + item.text;
+      var short = item.text.length > 70 ? item.text.slice(0, 67) + "..." : item.text;
+      var num = document.createElement("span");
+      num.className = "lof-num";
+      num.textContent = label + " " + item.num;
+      a.appendChild(num);
+      a.appendChild(document.createTextNode(short));
+      li.appendChild(a);
+      ol.appendChild(li);
+    });
+    frag.appendChild(ol);
+    return frag;
+  }
+
+  // 3. place both lists in the right-hand margin column
+  var pane = document.createElement("nav");
+  pane.id = "lof-pane";
+  pane.setAttribute("aria-label", "List of figures and tables");
+  var figs = buildList("Figures", "Fig.", collect("fig-"));
+  var tbls = buildList("Tables", "Table", collect("tbl-"));
+  if (figs) pane.appendChild(figs);
+  if (tbls) pane.appendChild(tbls);
+  sidebar.appendChild(pane);
+  sidebar.classList.remove("zindex-bottom");
+
+  // 4. highlight the entry for whichever figure or table is on screen
+  var links = {};
+  pane.querySelectorAll("a").forEach(function (a) { links[a.getAttribute("href").slice(1)] = a; });
+  var observer = new IntersectionObserver(function (entries) {
+    entries.forEach(function (entry) {
+      var link = links[entry.target.id];
+      if (link) link.classList.toggle("lof-active", entry.isIntersecting);
+    });
+  }, { rootMargin: "-20% 0px -50% 0px" });
+  Object.keys(links).forEach(function (id) {
+    var el = document.getElementById(id);
+    if (el) observer.observe(el);
+  });
+});
+</script>
 ```
 
 # Session info
