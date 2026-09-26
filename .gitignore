@@ -88,3 +88,7 @@ publications/*
 # OS cruft
 Thumbs.db
 .DS_Store
+
+# Local scratch copies of analysis scripts and R's default graphics device output
+scratch_run.R
+Rplots.pdf
