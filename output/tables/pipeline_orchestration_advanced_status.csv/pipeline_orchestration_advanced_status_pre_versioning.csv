@@ -1,0 +1,6 @@
+step,exit_code,expected_output_present
+3: baseline (/tool:groundfilter),0,TRUE
+4: resume (identical rerun),0,TRUE
+5: /retryfailed,0,TRUE
+6: /rebuild,0,TRUE
+7: external DTM input (topometrics),1,FALSE

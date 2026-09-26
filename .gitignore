@@ -92,3 +92,7 @@ Thumbs.db
 # Local scratch copies of analysis scripts and R's default graphics device output
 scratch_run.R
 Rplots.pdf
+
+# RForInvt::file_version() locks <output>/_tracking.lock while it updates
+# _tracking.csv; the lock is released afterwards but the empty file stays
+_tracking.lock

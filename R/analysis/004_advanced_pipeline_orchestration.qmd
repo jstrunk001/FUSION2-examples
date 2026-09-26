@@ -86,7 +86,7 @@ path_catalog   = fn_find_fusion_tool("catalog.exe")
 # The same small example point cloud tile used throughout this repo.
 path_las_example = file.path(
     dir_lidar_raw
-  , "USGS_LPC_WA_6County_A24_w2049750n409500_clip200ft_las12.las"
+  , "TC_1372_forest200ft.laz"
   )
 if(!file.exists(path_las_example)) stop("Example lidar tile not found at ", path_las_example)
 ```
@@ -146,9 +146,10 @@ command runs more than once against the same output directory -- the
 resume/idempotency behavior, `/retryfailed`, and `/rebuild` -- and one
 real gap in what `pipeline.exe` can currently start a chain from.
 
-**Example inputs.** The point-cloud input is the same small (`~1 MB`, 200 x
-200 ft, 51,737-point) clip of a public USGS 3DEP lidar tile used
-throughout this repo. The external-DTM input used in Step 7 is a set of
+**Example inputs.** The point-cloud input is the same small (`~0.5 MB`,
+200 x 200 ft, 70,532-point) window of closed-canopy forest from lidar
+tile `TC_1372` used throughout this repo, in its native LAS 1.4 point
+format 6 LAZ encoding. The external-DTM input used in Step 7 is a set of
 seven small (`~1 MB` each) real USGS 3DEP bare-earth lidar DTMs, one per
 Washington forest-type study site (subalpine Cascades, dry east-side,
 west-side plantation, old-growth rainforest, and three others), pulled

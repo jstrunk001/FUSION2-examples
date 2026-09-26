@@ -89,12 +89,10 @@ path_gridmetrics = fn_find_fusion_tool("gridmetrics.exe")
 
 # The same small example point cloud tile used by
 # 001_example_gridmetrics_lidar_pipeline.qmd -- see that script's "Pipeline
-# overview" section for the tile's real source URL, acquisition date, and
-# the LAS 1.2 / point format 0 re-encoding applied so the current build's
-# readers return real points rather than an all-NA result.
+# overview" section for the tile's source and how the window was chosen.
 path_las_example = file.path(
     dir_lidar_raw
-  , "USGS_LPC_WA_6County_A24_w2049750n409500_clip200ft_las12.las"
+  , "TC_1372_forest200ft.laz"
   )
 if(!file.exists(path_las_example)) stop("Example lidar tile not found at ", path_las_example)
 ```
@@ -181,9 +179,10 @@ with no raster stage at all. Every command is shown as the literal,
 resolved text a person would type at a terminal, immediately followed by
 the tool's own real captured console output.
 
-**Example input.** The point-cloud input is the same small (`~1 MB`, 200 x
-200 ft, 51,737-point) clip of a public USGS 3DEP lidar tile used by
-`001_example_gridmetrics_lidar_pipeline.qmd`.
+**Example input.** The point-cloud input is the same small (`~0.5 MB`,
+200 x 200 ft, 70,532-point) window of closed-canopy forest from lidar
+tile `TC_1372` used by `001_example_gridmetrics_lidar_pipeline.qmd`, in
+its native LAS 1.4 point format 6 LAZ encoding.
 
 # Step 1: Stage the example input into its own input directory
 
@@ -266,7 +265,7 @@ dir.create(dir_gridmetrics_batch_out, recursive = TRUE, showWarnings = FALSE)
 path_gridmetrics_batch_table = file.path(dir_gridmetrics_batch_out, "gridmetrics_batch_table.csv")
 
 cmd_gridmetrics_batch = sprintf(
-    '"%s" "%s" /outdir:"%s" %s %s /buffer:25 /cellsize:10 /strata:0.5,2.0,5.0,10.0,20.0 /output-table:"%s"'
+    '"%s" "%s" /outdir:"%s" %s %s /buffer:25 /cellsize:10 /strata:0.5,2.0,5.0,10.0,20.0,50.0,100.0 /output-table:"%s"'
   , path_gridmetrics, dir_las_input, dir_gridmetrics_batch_out
   , arg_extent, arg_tilesize, path_gridmetrics_batch_table
   )

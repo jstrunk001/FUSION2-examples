@@ -92,7 +92,7 @@ path_cloudmetrics = fn_find_fusion_tool("cloudmetrics.exe")
 # "Pipeline overview" section below for how it was sourced and reduced.
 path_las_example = file.path(
     dir_lidar_raw
-  , "USGS_LPC_WA_6County_A24_w2049750n409500_clip200ft_las12.las"
+  , "TC_1372_forest200ft.laz"
   )
 if(!file.exists(path_las_example)) stop("Example lidar tile not found at ", path_las_example)
 ```
@@ -148,28 +148,17 @@ exercise the current full metric bundle: height/intensity strata
 `gridmetrics`' opt-in per-cell table export (`/output-table`) in both of
 its supported formats, CSV and SQLite.
 
-**Example tile source.** The input tile is a small clip of a public USGS
-3DEP lidar point cloud, project `WA_6County_A24`, tile
-`w2049750n409500`, published 2026-07-02 at
-`https://rockyweb.usgs.gov/vdelivery/Datasets/Staged/Elevation/LPC/Projects/WA_6County_A24/WA_6County_1_A24/LAZ/USGS_LPC_WA_6County_A24_w2049750n409500.laz`.
-USGS 3DEP lidar point clouds are a U.S. government work product and are in
-the public domain. The full tile (2250 x 2250 ft, roughly 6.1 million
-points, 23.8 MB compressed) was clipped down to a 200 x 200 ft area near
-the tile center (51,737 points) and converted from its native LAS 1.4
-point format 6 to LAS 1.2 point format 0, then committed to
-`data/raw/lidar/` at roughly 1 MB. The projected coordinate system is
-NAD83(HARN) / Washington South (ftUS), EPSG:2927, vertical datum NAVD88
-(ftUS, Geoid18).
-
-**Point format note.** The current FUSION2 build's point-cloud readers
-return empty results (zero points, all-NA output rasters) on this tile's
-native LAZ-compressed, LAS 1.4 point format 6 encoding, but read the same
-points correctly once decompressed and re-encoded as LAS 1.2 point format
-0 -- confirmed against this same build's own `test_output/` artifacts,
-which show the identical all-NA pattern on a point format 6 input. The
-committed example tile therefore ships in LAS 1.2 point format 0 so this
-pipeline runs cleanly against the current build; no FUSION2 source code was
-changed to arrive at this workaround.
+**Example tile source.** The input tile is a 200 x 200 ft window of
+closed-canopy forest clipped from lidar tile `TC_1372` (NV5 Geospatial,
+2022 acquisition; 2250 x 2250 ft, about 6.2 million points). The window
+has 70,532 points, 92% canopy cover, a 95th-percentile height of 142 ft,
+and a tallest return of 176 ft. It is kept in the tile's native LAS 1.4
+point format 6 LAZ encoding (about 0.5 MB). The projected coordinate
+system is NAD83(HARN) / Washington South (ftUS), EPSG:2927, vertical datum
+NAVD88 (ftUS, Geoid03). `006_prepare_forested_example_tile.qmd` shows how
+the window was chosen: it scores every 200 ft window of the full tile by
+canopy cover and height and keeps the tallest window with at least 70%
+cover.
 
 Steps:
 
@@ -198,7 +187,7 @@ steps use to normalize point and canopy heights above ground.
 path_ground_dem = RForInvt::file_version(
     file.path(dir_derived, "ground_dem.tif")
   , increment = TRUE
-  , note = "ground DEM from example 200x200 ft lidar clip"
+  , note = "ground DEM from the forested TC_1372 200x200 ft clip"
   )
 
 #2. run groundfilter against the example tile
@@ -229,7 +218,7 @@ normalizes it to height above ground using the DEM from Step 1.
 path_chm = RForInvt::file_version(
     file.path(dir_derived, "chm.tif")
   , increment = TRUE
-  , note = "canopy height model from example 200x200 ft lidar clip"
+  , note = "canopy height model from the forested TC_1372 200x200 ft clip"
   )
 
 #2. run canopymodel against the example tile, using Step 1's ground DEM
@@ -254,8 +243,8 @@ variance/skewness/kurtosis, the full percentile curve, L-moments, and more
 normalized using Step 1's ground DEM. Three further capabilities are
 requested alongside that base bundle:
 
-- `/strata:0.5,2.0,5.0,10.0,20.0` buckets each cell's points into six
-  height strata (the five thresholds given, plus one "above the last
+- `/strata:0.5,2.0,5.0,10.0,20.0,50.0,100.0` buckets each cell's points into eight
+  height strata (the seven thresholds given, plus one "above the last
   threshold" bucket) and reports a count/proportion/mean/stddev/min/max
   summary per bucket, both as CSV columns and, with `/strataraster`, as
   raster bands (`stratum_00_mean`, `density_stratum_00`, ...).
@@ -299,7 +288,7 @@ dir.create(dir_gridmetrics_out, recursive = TRUE, showWarnings = FALSE)
 path_gridmetrics_table = RForInvt::file_version(
     file.path(dir_tables, "gridmetrics_table.csv")
   , increment = TRUE
-  , note = "gridmetrics per-cell CSV table (full metric bundle plus strata) from the example lidar clip"
+  , note = "gridmetrics per-cell CSV table (full metric bundle plus strata) from the forested TC_1372 200x200 ft clip"
   )
 
 #3. run gridmetrics against the example tile, requesting the full metric
@@ -314,7 +303,7 @@ fn_run_fusion_tool(
       , paste0("/outdir:", dir_gridmetrics_out)
       , "/nodata:NA"
       , "/noheight:0"
-      , "/strata:0.5,2.0,5.0,10.0,20.0"
+      , "/strata:0.5,2.0,5.0,10.0,20.0,50.0,100.0"
       , "/strataraster"
       , "/surfstats"
       , "/surfstats-source:max"
@@ -332,7 +321,7 @@ path_gridmetrics_raw = list.files(
 path_gridmetrics_raster = RForInvt::file_version(
     file.path(dir_derived, "gridmetrics.tif")
   , increment = TRUE
-  , note = "gridmetrics raster (full metric bundle, strata, surface stats) from example 200x200 ft lidar clip"
+  , note = "gridmetrics raster (full metric bundle, strata, surface stats) from the forested TC_1372 200x200 ft clip"
   )
 file.copy(path_gridmetrics_raw, path_gridmetrics_raster, overwrite = TRUE)
 ```
@@ -353,7 +342,7 @@ from the path's extension -- `.csv`, or `.sqlite`/`.db`/`.sqlite3`).
 path_gridmetrics_sqlite = RForInvt::file_version(
     file.path(dir_tables, "gridmetrics_table.sqlite")
   , increment = TRUE
-  , note = "gridmetrics per-cell SQLite table (table-only run, no raster) from the example lidar clip"
+  , note = "gridmetrics per-cell SQLite table (table-only run, no raster) from the forested TC_1372 200x200 ft clip"
   )
 
 #2. run gridmetrics again with /noraster + /output-table:<path.sqlite> --
@@ -368,7 +357,7 @@ fn_run_fusion_tool(
       , paste0("/ground:", path_ground_dem)
       , "/cellsize:10"
       , paste0("/outdir:", dir_gridmetrics_table_only_out)
-      , "/strata:0.5,2.0,5.0,10.0,20.0"
+      , "/strata:0.5,2.0,5.0,10.0,20.0,50.0,100.0"
       , "/noraster"
       , paste0("/output-table:", path_gridmetrics_sqlite)
       )
@@ -399,14 +388,12 @@ just placeholder output) -- including the new strata bands from Step 3 --
 cross-checks Step 3's CSV table against the raster, then saves a small
 summary table and a quick preview figure of the canopy height model.
 
-**`surface_area_ratio`/`roughness` are `/nodata` for every cell in this
-particular example clip**, confirmed by the `n_na == n_cells` rows in the
-summary table below -- both are computed only from cells with at least one
-point above `/minht` (see Step 3), and this clip's canopy cover is sparse
-(`canopy_cover` mean 2.7%, per the `dt_summary` row below), so no cell in
-this small 20x20 grid has a full 3x3 neighborhood of canopy-bearing cells.
-The bands are real and populated on denser canopy, just not demonstrable
-on this particular small, sparse-canopy example tile.
+`surface_area_ratio` and `roughness` are computed only from cells with at
+least one point above `/minht` (see Step 3) and a full 3 x 3 neighbourhood
+of such cells. Under this clip's closed canopy (`canopy_cover` mean about
+86%, per the `dt_summary` rows below) every cell qualifies, so both bands
+carry values in all 400 cells; on sparse canopy, cells without canopy
+neighbours are written as `/nodata`.
 
 ```{r}
 #| label: step-5-summarize
@@ -451,10 +438,8 @@ dt_gridmetrics_table = data.table::fread(path_gridmetrics_table)
 print(dt_gridmetrics_table[ , .(Col, Row, elev_mean, CanopyCover, stratum_02_mean, stratum_02_count)])
 
 #4. build a quick preview plot of the canopy height model
-#  - the current FUSION2 build does not attach a coordinate reference or
-#    real-world extent to its GeoTIFF output (cell indices only), so this
-#    preview uses relative grid coordinates rather than the tile's true
-#    projected coordinates
+#  - FUSION2's GeoTIFFs carry the tile's coordinate system and extent, so
+#    x and y here are the tile's true projected coordinates (EPSG:2927, ft)
 r_chm = terra::rast(path_chm)
 df_chm = as.data.frame(r_chm, xy = TRUE)
 names(df_chm) = c("x", "y", "canopy_height_ft")
@@ -465,9 +450,9 @@ p_chm = ggplot2::ggplot(df_chm, ggplot2::aes(x = x, y = y, fill = canopy_height_
   ggplot2::coord_equal() +
   ggplot2::labs(
       title = "Example canopy height model"
-    , subtitle = "USGS 3DEP tile WA_6County_A24, w2049750n409500 -- 200 x 200 ft clip"
-    , x = "Grid column (relative)"
-    , y = "Grid row (relative)"
+    , subtitle = "Lidar tile TC_1372 -- 200 x 200 ft closed-canopy forest clip"
+    , x = "Easting (ft, EPSG:2927)"
+    , y = "Northing (ft, EPSG:2927)"
     ) +
   ggplot2::theme_minimal(base_size = 12)
 
@@ -496,7 +481,7 @@ applies to this particular clip (it has plenty of canopy returns), but the
 columns are always present and worth naming for a reader comparing this
 output against a clip that does hit one of those cases. `/strata` below
 uses gridmetrics' Step 3 thresholds, bucketing this clip's points into the
-same six height strata and reporting `cloudmetrics`' own per-bucket
+same eight height strata and reporting `cloudmetrics`' own per-bucket
 count/proportion/mean/stddev/min/max summary as CSV columns -- there is no
 raster to append bands to here, since `cloudmetrics` produces one summary
 row (or one row per `/shape` polygon feature), not a grid.
@@ -522,7 +507,7 @@ fn_run_fusion_tool(
       , "/minht:2.0"
       , "/nodata:NA"
       , "/noheight:0"
-      , "/strata:0.5,2.0,5.0,10.0,20.0"
+      , "/strata:0.5,2.0,5.0,10.0,20.0,50.0,100.0"
       )
   , tool_label = "cloudmetrics"
   )
