@@ -223,3 +223,92 @@ if(dt_clip_summary$n_ground < 100) stop("Clip has fewer than 100 ground points -
 if(is.na(sf::st_crs(las_check))) stop("Clip lost its coordinate system.")
 if(dt_clip_summary$file_mb > 5) warning("Clip is larger than 5 MB -- consider a smaller window before committing it.")
 ```
+
+# Step 5: Fetch a matching USGS bare-earth DTM for the clip
+
+005 runs `topometrics` a second time on an external DTM, to check that the
+tool keeps an input raster's coordinate system. That DTM should cover the
+same ground as the example tile, so its slope and aspect can be compared
+with those from FUSION2's own ground surface. The USGS 3DEP elevation
+service returns a bare-earth clip for any extent, reprojected to the
+tile's coordinate system.
+
+The service reports elevations in metres. They are converted to the
+tile's own vertical unit before saving, since a DTM whose elevations and
+coordinates are in different units gives wrong slopes.
+
+```{r}
+#| label: step-5-fetch-dtm
+
+#1. set the request: the clip's extent plus a 50 ft pad on every side, on
+#   a 3 ft grid, in the clip's horizontal coordinate system
+#  - terra reports the horizontal part of the tile's compound (horizontal
+#    plus vertical) coordinate system as an EPSG code the service accepts
+pad_dtm = 50 * unit_per_ft
+cellsize_dtm = 3 * unit_per_ft
+ext_dtm = c(
+    xmin = floor(las_check@header$`Min X` - pad_dtm)
+  , ymin = floor(las_check@header$`Min Y` - pad_dtm)
+  , xmax = ceiling(las_check@header$`Max X` + pad_dtm)
+  , ymax = ceiling(las_check@header$`Max Y` + pad_dtm)
+  )
+crs_desc = terra::crs(terra::rast(ext = terra::ext(0, 1, 0, 1), crs = sf::st_crs(las_check)$wkt), describe = TRUE)
+epsg_dtm = crs_desc$code
+if(is.na(epsg_dtm) || !nzchar(epsg_dtm)) stop("Could not find an EPSG code for the clip's horizontal coordinate system.")
+n_cols_dtm = round((ext_dtm[["xmax"]] - ext_dtm[["xmin"]]) / cellsize_dtm)
+n_rows_dtm = round((ext_dtm[["ymax"]] - ext_dtm[["ymin"]]) / cellsize_dtm)
+url_dtm = paste0(
+    "https://elevation.nationalmap.gov/arcgis/rest/services/3DEPElevation/ImageServer/exportImage"
+  , "?bbox=", paste(ext_dtm[c("xmin", "ymin", "xmax", "ymax")], collapse = ",")
+  , "&bboxSR=", epsg_dtm, "&imageSR=", epsg_dtm
+  , "&size=", n_cols_dtm, ",", n_rows_dtm
+  , "&format=tiff&pixelType=F32&interpolation=RSP_BilinearInterpolation&f=image"
+  )
+
+#2. download the clip, retrying a few times
+#  - the service occasionally times out on a first request
+dir_dtm_site = file.path("data", "raw", "lidar_dtm_examples", "site_tc_1372_forest")
+dir.create(dir_dtm_site, recursive = TRUE, showWarnings = FALSE)
+path_dtm_download = file.path(tempdir(), "usgs_3dep_dtm_metres.tif")
+r_dtm_m = NULL
+for(attempt_i in 1:4) {
+  result_i = try(utils::download.file(url_dtm, path_dtm_download, mode = "wb", quiet = TRUE), silent = TRUE)
+  if(!inherits(result_i, "try-error")) r_dtm_m = try(terra::rast(path_dtm_download), silent = TRUE)
+  if(!is.null(r_dtm_m) && !inherits(r_dtm_m, "try-error")) break
+  r_dtm_m = NULL
+  Sys.sleep(10)
+  }
+if(is.null(r_dtm_m)) stop("USGS 3DEP elevation service did not return a readable raster after 4 attempts.")
+
+#3. convert elevations from metres to the tile's vertical unit and save
+#  - US survey feet: 1 m = 3937/1200 ft
+metres_to_unit = if(unit_is_feet) 3937 / 1200 else 1
+r_dtm = r_dtm_m * metres_to_unit
+names(r_dtm) = "elevation"
+path_dtm = file.path(dir_dtm_site, "usgs_3dep_dtm.tif")
+terra::writeRaster(r_dtm, path_dtm, overwrite = TRUE, gdal = c("COMPRESS=LZW"))
+
+#4. interrogate: the DTM must sit on the requested extent in the clip's
+#   coordinate system, have no gaps, and agree with the clip's own ground
+#   points to within a few feet
+r_dtm_check = terra::rast(path_dtm)
+print(r_dtm_check)
+if(terra::crs(r_dtm_check, describe = TRUE)$code != epsg_dtm) stop("Saved DTM is not in EPSG:", epsg_dtm)
+if(any(abs(as.vector(terra::ext(r_dtm_check)) - ext_dtm[c("xmin", "xmax", "ymin", "ymax")]) > cellsize_dtm)) stop("Saved DTM does not cover the requested extent.")
+if(any(is.na(terra::values(r_dtm_check)))) stop("Saved DTM has empty cells.")
+las_ground_check = lidR::filter_poi(las_check, Classification == 2L & !Withheld_flag)
+z_dtm_at_ground = terra::extract(r_dtm_check, cbind(las_ground_check$X, las_ground_check$Y), method = "bilinear")[ , 1]
+diff_dtm = las_ground_check$Z - z_dtm_at_ground
+cat("Clip ground points minus USGS DTM (tile units): median", round(stats::median(diff_dtm), 2), "; 95% of points within", round(stats::quantile(abs(diff_dtm), 0.95), 2), "\n")
+if(abs(stats::median(diff_dtm)) > 3 * unit_per_ft) stop("USGS DTM and the clip's ground points differ by more than 3 ft at the median -- check units and vertical datum.")
+
+#5. plot the clip's ground points (y) against the DTM beneath them (x)
+dt_dtm_cmp = data.table::data.table(usgs_dtm = z_dtm_at_ground, ground_points = las_ground_check$Z)
+range_dtm_cmp = range(c(dt_dtm_cmp$usgs_dtm, dt_dtm_cmp$ground_points))
+ggplot2::ggplot(dt_dtm_cmp, ggplot2::aes(x = usgs_dtm, y = ground_points)) +
+  ggplot2::geom_abline(slope = 1, intercept = 0, colour = "grey50") +
+  ggplot2::geom_point(alpha = 0.3, size = 0.6) +
+  ggplot2::coord_fixed(ratio = 1, xlim = range_dtm_cmp, ylim = range_dtm_cmp) +
+  ggplot2::labs(title = "Clip ground points vs. USGS 3DEP DTM", x = "USGS DTM elevation (tile units)", y = "ground point elevation (tile units)") +
+  ggplot2::theme_minimal(base_size = 11)
+```

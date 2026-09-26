@@ -122,11 +122,14 @@ print(dt_build)
 #    Every clip box, plot, and elevation band below is placed relative to
 #    this tile's own extent and elevations, so another tile can be swapped
 #    in without editing coordinates
-#  - the external DTM is a real USGS bare-earth raster with a coordinate
-#    system attached, used to check that raster-in/raster-out tools carry
-#    that coordinate system through
+#  - the external DTM is a USGS 3DEP bare-earth raster covering the same
+#    ground as the tile (plus a 50 ft pad), with a coordinate system
+#    attached; 006 Step 5 fetches it. It is used to check that
+#    raster-in/raster-out tools carry the coordinate system through, and
+#    its slope and aspect can be compared directly with those from the
+#    FUSION2 ground DEM
 path_las = normalizePath(file.path(dir_lidar_raw, "TC_1372_forest200ft.laz"), winslash = "/")
-path_dtm_external = normalizePath(file.path(dir_dtm_raw, "site_grays_harbor", "usgs_lidar_dtm.tif"), winslash = "/")
+path_dtm_external = normalizePath(file.path(dir_dtm_raw, "site_tc_1372_forest", "usgs_3dep_dtm.tif"), winslash = "/")
 if(!file.exists(path_las)) stop("Example lidar tile not found at ", path_las)
 if(!file.exists(path_dtm_external)) stop("External example DTM not found at ", path_dtm_external)
 ```
@@ -393,14 +396,20 @@ if(fn_check_file(2, "catalog", path_catalog_csv, "CSV report")) {
   fn_check(2, "catalog", "Z range matches the tile within 0.01 ft", all(abs(c(dt_catalog$MinZ, dt_catalog$MaxZ) - z_range_raw) <= 0.01), c(dt_catalog$MinZ, dt_catalog$MaxZ), z_range_raw)
   }
 
-#3. check that /density produced a raster, and that its cell counts sum
-#   to the tile's point count
+#3. check that /density produced a raster placed on the tile, with a
+#   coordinate system, whose cell counts sum exactly to the point count
+#  - a raster with the right counts can still sit at the grid origin
+#    (0, 0) instead of on the tile, so placement is checked separately
+#  - points exactly on the tile's east or south edge belong to the last
+#    column or row, so every point is counted and the sum is exact
 paths_catalog_tif = list.files(dir_catalog, pattern = "\\.tif$", full.names = TRUE)
 fn_check(2, "catalog", "/density raster written", length(paths_catalog_tif) > 0, length(paths_catalog_tif), ">= 1 .tif")
 if(length(paths_catalog_tif) > 0) {
   r_catalog_density = terra::rast(paths_catalog_tif[1])
+  fn_check_raster_extent(2, "catalog", r_catalog_density, "density raster")
+  fn_check_raster_crs(2, "catalog", r_catalog_density, "density raster")
   n_implied = sum(terra::values(r_catalog_density[[1]]), na.rm = TRUE)
-  fn_check(2, "catalog", "density raster sums to the point count (within 0.5%)", abs(n_implied - n_points_raw) / n_points_raw < 0.005, round(n_implied), n_points_raw)
+  fn_check(2, "catalog", "density raster sums to the point count", n_implied == n_points_raw, round(n_implied), n_points_raw)
   }
 ```
 
@@ -906,8 +915,9 @@ if(fn_check_file(11, "cloudmetrics", path_cm_plots, "per-plot metrics CSV")) {
 # Step 12: Compute slope and aspect with `topometrics`
 
 `topometrics` derives slope and aspect from a DEM. It is run twice: on the
-FUSION2 ground DEM from Step 5, and on the external USGS DTM, which has a
-coordinate system attached. The reference slope and aspect come from
+FUSION2 ground DEM from Step 5, and on the external USGS DTM of the same
+ground, which has a coordinate system attached. The reference slope and
+aspect come from
 `terra::terrain()`. Edge cells have no full neighborhood, so they are left
 out of the comparison.
 
