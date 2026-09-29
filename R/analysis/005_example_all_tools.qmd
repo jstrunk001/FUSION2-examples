@@ -176,9 +176,23 @@ fn_check = function(step, tool, check, passed, observed = "", expected = "", sev
   invisible(passed_in)
   }
 
-#3. define a helper that runs one tool, prints its console output, and logs
-#   whether it exited cleanly
+#3. define a helper that runs one tool, prints its console output, logs
+#   whether it exited cleanly, and records the command it ran
 #  - uses try() so a crashing tool is logged, not fatal
+#  - the recorded command reads the same on any machine: files this run
+#    writes become out/..., and input files become paths relative to the
+#    project root (the run folder is replaced first, since it sits inside
+#    the project); an argument holding a space is quoted
+#  - the FUSION2 user manual shows these recorded commands as its
+#    worked examples (see 007_export_fusion2_docs_assets.qmd)
+env_checks$commands = list()
+dir_project = normalizePath(".", winslash = "/")
+fn_portable_args = function(args){
+  args_in = gsub(paste0(dir_run, "/"), "out/", args, fixed = TRUE)
+  args_in = gsub(dir_run, "out", args_in, fixed = TRUE)
+  args_in = gsub(paste0(dir_project, "/"), "", args_in, fixed = TRUE)
+  ifelse(grepl(" ", args_in, fixed = TRUE), paste0("\"", args_in, "\""), args_in)
+  }
 fn_run_tool = function(step, tool, args, run_label){
   cat("\n---", run_label, "---\n", path_tools[[tool]], paste(args, collapse = " "), "\n")
   result = try(system2(path_tools[[tool]], args = args, stdout = TRUE, stderr = TRUE), silent = TRUE)
@@ -187,6 +201,13 @@ fn_run_tool = function(step, tool, args, run_label){
   if(inherits(result, "try-error")) exit_status = -1L
   cat(paste(result, collapse = "\n"), "\n")
   fn_check(step, tool, paste0(run_label, ": exits with status 0"), exit_status == 0, exit_status, 0)
+  env_checks$commands[[length(env_checks$commands) + 1]] = data.table::data.table(
+      step        = step
+    , tool        = tool
+    , run_label   = run_label
+    , command     = paste(c(tool, fn_portable_args(args)), collapse = " ")
+    , exit_status = exit_status
+    )
   invisible(list(exit_status = exit_status, console = as.character(result)))
   }
 
@@ -1228,7 +1249,19 @@ path_check_log = RForInvt::file_version(
 data.table::fwrite(dt_checks, path_check_log)
 cat("Check log written to:", path_check_log, "\n")
 
-#4. chart pass/warn/fail counts per tool, in the order the tools ran
+#4. save every command this run executed, in run order, with its exit
+#   status and the run folder it wrote into
+dt_commands = data.table::rbindlist(env_checks$commands)
+dt_commands[ , run_folder := basename(dir_run)]
+path_command_log = RForInvt::file_version(
+    file.path(dir_tables, "all_tools_commands.csv")
+  , increment = TRUE
+  , note = "every tool command run by 005_example_all_tools.qmd"
+  )
+data.table::fwrite(dt_commands, path_command_log)
+cat("Command log written to:", path_command_log, "\n")
+
+#5. chart pass/warn/fail counts per tool, in the order the tools ran
 dt_plot = dt_checks[ , .N, by = .(tool, result)]
 dt_plot[ , tool := factor(tool, levels = rev(unique(dt_checks$tool)))]
 dt_plot[ , result := factor(result, levels = c("fail", "warn", "pass"))]
