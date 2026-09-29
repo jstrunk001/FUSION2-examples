@@ -92,21 +92,29 @@ These helpers turn log rows into Markdown the manual can include.
 ```{r}
 #| label: helper-functions
 
-#1. define a helper that shortens a long value for a table cell, and
-#   escapes the "|" character Markdown tables use as a column divider
+#1. define a helper that prepares a value for a table cell
+#  - shortens long values, ending them with "..."
+#  - escapes "|", the character Markdown tables use as a column divider
+#  - adds an invisible break point (a zero-width space) after "_",
+#    ",", and "/", so long file names and coordinate lists can wrap
+#    inside a narrow column instead of running into the next one
 fn_cell = function(x, max_chars = 45){
   x_in = trimws(as.character(x))
   x_in[is.na(x_in)] = ""
   too_long = nchar(x_in) > max_chars
   x_in[too_long] = paste0(substr(x_in[too_long], 1, max_chars - 3), "...")
-  gsub("|", "\\|", x_in, fixed = TRUE)
+  x_in = gsub("|", "\\|", x_in, fixed = TRUE)
+  gsub("([_,/])", "\\1\u200b", x_in, perl = TRUE)
   }
 
 #2. define a helper that writes a data.table as a Markdown pipe table,
 #   with a Quarto caption and label so the table is numbered
-fn_pipe_table = function(dt, caption, label){
+#  - widths are relative column widths; each becomes that many dashes in
+#    the divider row, which is how Markdown tables set column widths, and
+#    the leading ":" left-aligns every column
+fn_pipe_table = function(dt, caption, label, widths = rep(10, ncol(dt))){
   header = paste0("| ", paste(names(dt), collapse = " | "), " |")
-  divider = paste0("|", paste(rep("---", ncol(dt)), collapse = "|"), "|")
+  divider = paste0("|", paste(paste0(":", strrep("-", widths)), collapse = "|"), "|")
   rows = apply(dt, 1, function(r) paste0("| ", paste(r, collapse = " | "), " |"))
   c(header, divider, rows, "", paste0(": ", caption, " {#", label, "}"), "")
   }
@@ -299,6 +307,7 @@ for(tool_i in nms_tools){
       dt_chk_i
     , caption = paste0("Automated checks on the example run of `", tool_i, "`.")
     , label = paste0("tbl-checks-", tool_i)
+    , widths = c(40, 10, 25, 25)
     )
   writeLines(lines_chk_i, file.path(dir_out_fragments, paste0(tool_i, "_checks.md")))
 
@@ -313,17 +322,17 @@ for(tool_i in nms_tools){
 
 #3. write the appendix pieces
 #  - run details
-writeLines(fn_pipe_table(dt_run_info[ , .(Item = item, Value = fn_cell(value, 60))], "The example run the manual's worked examples come from.", "tbl-run-info"), file.path(dir_out_fragments, "run_info.md"))
+writeLines(fn_pipe_table(dt_run_info[ , .(Item = item, Value = fn_cell(value, 60))], "The example run the manual's worked examples come from.", "tbl-run-info", widths = c(30, 70)), file.path(dir_out_fragments, "run_info.md"))
 
 #  - tally by tool, in run order ("reference" is 005's own setup step)
 dt_tally = data.table::dcast(dt_checks[ , .N, by = .(tool, result)], tool ~ result, value.var = "N", fill = 0)
 for(col_i in setdiff(c("pass", "warn", "fail"), names(dt_tally))) dt_tally[ , (col_i) := 0L]
 dt_tally = dt_tally[match(unique(dt_checks$tool), tool), .(Tool = tool, Checks = pass + warn + fail, Pass = pass, Warn = warn, Fail = fail)]
-writeLines(fn_pipe_table(dt_tally, "Automated check results by tool on the example run.", "tbl-checks-by-tool"), file.path(dir_out_fragments, "checks_by_tool.md"))
+writeLines(fn_pipe_table(dt_tally, "Automated check results by tool on the example run.", "tbl-checks-by-tool", widths = c(30, 14, 14, 14, 14)), file.path(dir_out_fragments, "checks_by_tool.md"))
 
 #  - every check
 dt_all = dt_checks[ , .(Tool = tool, Check = fn_cell(check, 60), Severity = severity, Result = result, Observed = fn_cell(observed, 30), Expected = fn_cell(expected, 30))]
-writeLines(fn_pipe_table(dt_all, "Every automated check on the example run, in the order it ran.", "tbl-all-checks"), file.path(dir_out_fragments, "all_checks.md"))
+writeLines(fn_pipe_table(dt_all, "Every automated check on the example run, in the order it ran.", "tbl-all-checks", widths = c(17, 32, 9, 10, 16, 16)), file.path(dir_out_fragments, "all_checks.md"))
 ```
 
 # Step 6: Check the export
