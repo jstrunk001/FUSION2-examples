@@ -1,3 +1,4 @@
+
 # FUSION2-examples
 
 Example forestry lidar processing workflows and small sample datasets
@@ -9,6 +10,15 @@ Station).
 This is a companion repository to `FUSION2`, kept separate so example
 lidar point clouds and forestry plot/stand datasets don't bloat the core
 tool's source history.
+
+### Access FUSION2 built tools
+
+The most convenient way to get started is to download a pre-built toolset from the [FUSION2 GitHub Releases page](https://github.com/jstrunk001/FUSION2/releases). With minimal static profile and symbol stripping, each tool executable is compact (~8–15 MB each, ~120–150 MB total for all 13 tools combined), with zero external DLL dependencies.
+
+Built bundles are published as **GitHub Release assets**:
+- `build.ps1 -Publish` zips the current `bin/` contents, uploads the zip to a new GitHub Release tagged `tools-v<version>-<timestamp>`, and cleans up the previous release tag.
+- To download pre-built binaries, visit the repository's [Releases page](https://github.com/jstrunk001/FUSION2/releases).
+
 
 ## Objectives
 
