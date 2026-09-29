@@ -1,0 +1,366 @@
+---
+title: "Export the All-Tools Run's Figures, Commands, and Checks to the FUSION2 Manual"
+author: "Jacob Strunk"
+date: today
+format: html
+execute:
+  echo: true
+  warning: false
+  message: false
+---
+
+<!--
+Pipeline script -- takes one finished 005 run (its run folder, check log,
+and command log) and writes everything the FUSION2 user manual's worked
+examples need into the sibling FUSION2 repository's docs/examples/ folder:
+
+  docs/examples/figures/    one PNG per figure in 005_example_all_tools_REPORT.qmd
+  docs/examples/tables/     the check log, the command log, and run details as CSV
+  docs/examples/fragments/  small Markdown pieces the manual's chapters
+                            include: each tool's commands, checks, and figures
+
+The figures are drawn by 005_example_all_tools_REPORT.qmd itself, rendered
+to Markdown so Quarto saves each figure as a PNG named by its chunk label.
+No plotting code is copied here. PNG is used instead of this project's
+usual TIFF because neither the manual's HTML pages nor its PDF can show
+TIFF images.
+
+The files written into FUSION2 are versioned by FUSION2's git history, not
+by RForInvt::file_version(): each export replaces the previous one, and
+the manual always shows the latest run.
+
+Run 005 first, then this script, then rebuild the manual in FUSION2
+(build.ps1). The FUSION2 repository is expected next to this one
+(../FUSION2); set the FUSION2_REPO_DIR environment variable to use a
+different location.
+-->
+
+# Setup
+
+## Reset working directory to the project root
+
+This script lives in `R/analysis/`, but Quarto runs chunks from the
+`.qmd`'s own folder, so project-relative paths need the working directory
+moved to the project root. The setting takes effect from the next chunk.
+
+```{r}
+#| label: root-dir
+
+knitr::opts_knit$set(root.dir = "../..")
+```
+
+## Load libraries and set default options
+
+Loads `data.table` for the logs and `RForInvt` to find the newest
+versioned logs.
+
+```{r}
+#| label: setup
+
+#1. load packages
+library(data.table)
+library(RForInvt)
+
+#2. set project directories
+dir_tables    = file.path("output", "tables")
+dir_runs_root = file.path("data", "derived", "all_tools_example")
+dir_scratch   = file.path("data", "derived", "docs_export")
+path_report   = file.path("R", "analysis", "005_example_all_tools_REPORT.qmd")
+
+#3. locate the FUSION2 repository and its manual's examples folder
+dir_fusion2 = Sys.getenv("FUSION2_REPO_DIR", unset = file.path("..", "FUSION2"))
+if(!file.exists(file.path(dir_fusion2, "build.ps1"))) stop("FUSION2 repository not found at ", dir_fusion2, "; set FUSION2_REPO_DIR")
+dir_docs_examples = file.path(dir_fusion2, "docs", "examples")
+dir_out_figures   = file.path(dir_docs_examples, "figures")
+dir_out_tables    = file.path(dir_docs_examples, "tables")
+dir_out_fragments = file.path(dir_docs_examples, "fragments")
+for(dir_i in c(dir_out_figures, dir_out_tables, dir_out_fragments)) dir.create(dir_i, recursive = TRUE, showWarnings = FALSE)
+
+#4. set the tool order the manual follows (the order 005 runs them in)
+nms_tools = c(
+    "catalog", "filterdata", "thindata", "groundfilter", "clipdata"
+  , "canopymodel", "returndensity", "densitymetrics", "gridmetrics"
+  , "cloudmetrics", "topometrics", "gridsurfacestats", "canopymaxima"
+  , "treeseg", "pipeline"
+  )
+```
+
+## Define helper functions used throughout this script
+
+These helpers turn log rows into Markdown the manual can include.
+
+```{r}
+#| label: helper-functions
+
+#1. define a helper that shortens a long value for a table cell, and
+#   escapes the "|" character Markdown tables use as a column divider
+fn_cell = function(x, max_chars = 45){
+  x_in = trimws(as.character(x))
+  x_in[is.na(x_in)] = ""
+  too_long = nchar(x_in) > max_chars
+  x_in[too_long] = paste0(substr(x_in[too_long], 1, max_chars - 3), "...")
+  gsub("|", "\\|", x_in, fixed = TRUE)
+  }
+
+#2. define a helper that writes a data.table as a Markdown pipe table,
+#   with a Quarto caption and label so the table is numbered
+fn_pipe_table = function(dt, caption, label){
+  header = paste0("| ", paste(names(dt), collapse = " | "), " |")
+  divider = paste0("|", paste(rep("---", ncol(dt)), collapse = "|"), "|")
+  rows = apply(dt, 1, function(r) paste0("| ", paste(r, collapse = " | "), " |"))
+  c(header, divider, rows, "", paste0(": ", caption, " {#", label, "}"), "")
+  }
+
+#3. define a helper that lays one command out for the Windows Command
+#   Prompt: the tool and its input on the first line, then one option per
+#   line, joined with the "^" line-continuation character
+#  - splitting on " /" keeps an option's value with its option; the
+#    commands never contain " /" inside a value (paths use forward slashes
+#    with no leading space)
+fn_command_block = function(command){
+  parts = strsplit(command, " /", fixed = TRUE)[[1]]
+  if(length(parts) == 1) return(parts)
+  c(paste0(parts[1], " ^"), paste0("    /", parts[-c(1, length(parts))], " ^"), paste0("    /", parts[length(parts)]))
+  }
+```
+
+# Step 1: Pick the 005 run to export
+
+Picks the newest 005 command log and the check log from the same run,
+then reads the run folder named in the command log. Both logs are written
+at the end of one 005 run, so they share a run folder.
+
+```{r}
+#| label: step-1-pick-run
+
+#1. read the newest command log and check log
+path_command_log = RForInvt::file_version(file.path(dir_tables, "all_tools_commands.csv"))
+path_check_log   = RForInvt::file_version(file.path(dir_tables, "all_tools_check_log.csv"))
+dt_commands = data.table::fread(path_command_log)
+dt_checks   = data.table::fread(path_check_log)
+
+#2. find the run folder the commands wrote into
+run_folder = unique(dt_commands$run_folder)
+if(length(run_folder) != 1) stop("Command log names more than one run folder: ", paste(run_folder, collapse = ", "))
+dir_run = file.path(dir_runs_root, "run", run_folder)
+if(!dir.exists(dir_run)) stop("Run folder not found: ", dir_run)
+
+#3. confirm the two logs come from the same run
+#  - both are stamped when 005's last step runs, so their timestamps
+#    (the trailing _YYYYMMDDHHMMSS) match
+stamp_commands = sub(".*_([0-9]{14})\\.csv$", "\\1", basename(path_command_log))
+stamp_checks   = sub(".*_([0-9]{14})\\.csv$", "\\1", basename(path_check_log))
+if(stamp_commands != stamp_checks) stop("Command log (", stamp_commands, ") and check log (", stamp_checks, ") come from different 005 runs")
+
+#4. every command must have exited cleanly and every hard check passed
+#   before the run is used as the manual's example
+if(any(dt_commands$exit_status != 0)) stop("Some commands in this run did not exit cleanly")
+n_failed = dt_checks[result == "fail", .N]
+if(n_failed > 0) stop(n_failed, " hard checks failed in this run; fix them before exporting it to the manual")
+
+cat("Exporting run:", dir_run, "\n")
+cat("Commands:", nrow(dt_commands), " Checks:", nrow(dt_checks), "\n")
+```
+
+# Step 2: Render the report's figures to PNG
+
+Renders `005_example_all_tools_REPORT.qmd` to Markdown for the chosen run.
+Quarto saves each figure as a PNG named after its chunk label
+(`fig-catalog-density-1.png`), which is all this step keeps from the
+render.
+
+```{r}
+#| label: step-2-render-figures
+
+#1. clear the previous render
+dir_render = file.path(dir_scratch, "render")
+unlink(dir_render, recursive = TRUE)
+dir.create(dir_render, recursive = TRUE, showWarnings = FALSE)
+
+#2. render the report to Markdown for this run
+#  - Quarto resolves --output-dir relative to the report's own folder
+args_render = c(
+    "render", path_report
+  , "--to", "gfm"
+  , "--output-dir", file.path("..", "..", dir_render)
+  , "-M", "fig-dpi:150"
+  , "-P", paste0("dir_run:", dir_run)
+  , "-P", paste0("path_check_log:", path_check_log)
+  )
+render_status = system2("quarto", args = args_render)
+if(render_status != 0) stop("Rendering the report failed with status ", render_status)
+
+#3. find the rendered figures
+dir_render_figures = file.path(dir_render, "005_example_all_tools_REPORT_files", "figure-commonmark")
+paths_png = list.files(dir_render_figures, pattern = "\\.png$", full.names = TRUE)
+cat(length(paths_png), "figures rendered\n")
+```
+
+# Step 3: Match each figure to its caption and tool
+
+Reads every figure label and caption from the report's source, so the
+manual shows the same captions. The tool is the word after `fig-` in the
+label.
+
+```{r}
+#| label: step-3-captions
+
+#1. read label and caption pairs from the report source
+lines_report = readLines(path_report, warn = FALSE)
+idx_label = grep("^#\\| label: fig-", lines_report)
+dt_figures = data.table::data.table(
+    label   = sub("^#\\| label: ", "", lines_report[idx_label])
+  , caption = sub("^#\\| fig-cap: \"(.*)\"$", "\\1", lines_report[idx_label + 1])
+  )
+
+#2. name each figure's tool and PNG
+dt_figures[ , tool := sub("^fig-([a-z]+).*$", "\\1", label)]
+dt_figures[ , path_png := file.path(dir_render_figures, paste0(label, "-1.png"))]
+
+#3. every figure in the report must have a PNG and belong to a known tool
+missing_png = dt_figures[!file.exists(path_png), label]
+if(length(missing_png) > 0) stop("No PNG rendered for: ", paste(missing_png, collapse = ", "))
+unknown_tool = dt_figures[!tool %in% nms_tools, label]
+if(length(unknown_tool) > 0) stop("Figure label does not start with a tool name: ", paste(unknown_tool, collapse = ", "))
+if(any(!grepl("^fig-", dt_figures$label)) || any(grepl("fig-cap", dt_figures$caption))) stop("A figure label is not followed by its caption in the report source")
+print(dt_figures[ , .(label, tool)])
+```
+
+# Step 4: Copy figures and logs into the FUSION2 manual
+
+Replaces the manual's figures and tables with this run's. Old files are
+cleared first so a figure dropped from the report doesn't linger in the
+manual; FUSION2's git history keeps every earlier export.
+
+```{r}
+#| label: step-4-copy
+
+#1. replace the figures
+unlink(list.files(dir_out_figures, pattern = "\\.png$", full.names = TRUE))
+path_png_out = file.path(dir_out_figures, paste0(dt_figures$label, ".png"))
+copied = file.copy(dt_figures$path_png, path_png_out, overwrite = TRUE)
+if(!all(copied)) stop("Could not copy: ", paste(dt_figures$label[!copied], collapse = ", "))
+
+#2. copy the two logs
+data.table::fwrite(dt_checks, file.path(dir_out_tables, "all_tools_check_log.csv"))
+data.table::fwrite(dt_commands, file.path(dir_out_tables, "all_tools_commands.csv"))
+
+#3. record which run and which FUSION2 build the manual's examples show
+dt_run_info = data.table::data.table(
+    item  = c("run folder", "command log", "check log", "tools tested (modified)", "commands", "checks", "checks passed", "checks warned")
+  , value = c(
+        run_folder
+      , basename(path_command_log)
+      , basename(path_check_log)
+      , max(dt_checks$build_modified, na.rm = TRUE)
+      , nrow(dt_commands)
+      , nrow(dt_checks)
+      , dt_checks[result == "pass", .N]
+      , dt_checks[result == "warn", .N]
+      )
+  )
+data.table::fwrite(dt_run_info, file.path(dir_out_tables, "run_info.csv"))
+print(dt_run_info)
+```
+
+# Step 5: Write the Markdown pieces the manual includes
+
+Writes three pieces per tool (its commands, its checks, and its figures)
+plus three for the appendix (run details, a tally by tool, and every
+check). The manual's chapters live in `docs/tools/`, one folder away
+from `docs/examples/`, so figure paths are written relative to there.
+
+```{r}
+#| label: step-5-fragments
+
+#1. clear the previous pieces
+unlink(list.files(dir_out_fragments, pattern = "\\.md$", full.names = TRUE))
+
+#2. write each tool's commands, checks, and figures
+for(tool_i in nms_tools){
+  #  - commands: one Command Prompt block, a REM line naming each run
+  dt_cmd_i = dt_commands[tool == tool_i]
+  lines_cmd_i = c("```bat")
+  for(j in seq_len(nrow(dt_cmd_i))){
+    if(j > 1) lines_cmd_i = c(lines_cmd_i, "")
+    lines_cmd_i = c(lines_cmd_i, paste("REM", dt_cmd_i$run_label[j]), fn_command_block(dt_cmd_i$command[j]))
+    }
+  lines_cmd_i = c(lines_cmd_i, "```", "")
+  writeLines(lines_cmd_i, file.path(dir_out_fragments, paste0(tool_i, "_commands.md")))
+
+  #  - checks: one numbered table
+  dt_chk_i = dt_checks[tool == tool_i, .(
+      Check    = fn_cell(check, 70)
+    , Result   = result
+    , Observed = fn_cell(observed)
+    , Expected = fn_cell(expected)
+    )]
+  lines_chk_i = fn_pipe_table(
+      dt_chk_i
+    , caption = paste0("Automated checks on the example run of `", tool_i, "`.")
+    , label = paste0("tbl-checks-", tool_i)
+    )
+  writeLines(lines_chk_i, file.path(dir_out_fragments, paste0(tool_i, "_checks.md")))
+
+  #  - figures: one numbered figure per report figure, same caption
+  dt_fig_i = dt_figures[tool == tool_i]
+  lines_fig_i = character(0)
+  for(j in seq_len(nrow(dt_fig_i))){
+    lines_fig_i = c(lines_fig_i, paste0("![", dt_fig_i$caption[j], "](../examples/figures/", dt_fig_i$label[j], ".png){#", dt_fig_i$label[j], "}"), "")
+    }
+  writeLines(lines_fig_i, file.path(dir_out_fragments, paste0(tool_i, "_figures.md")))
+  }
+
+#3. write the appendix pieces
+#  - run details
+writeLines(fn_pipe_table(dt_run_info[ , .(Item = item, Value = fn_cell(value, 60))], "The example run the manual's worked examples come from.", "tbl-run-info"), file.path(dir_out_fragments, "run_info.md"))
+
+#  - tally by tool, in run order ("reference" is 005's own setup step)
+dt_tally = data.table::dcast(dt_checks[ , .N, by = .(tool, result)], tool ~ result, value.var = "N", fill = 0)
+for(col_i in setdiff(c("pass", "warn", "fail"), names(dt_tally))) dt_tally[ , (col_i) := 0L]
+dt_tally = dt_tally[match(unique(dt_checks$tool), tool), .(Tool = tool, Checks = pass + warn + fail, Pass = pass, Warn = warn, Fail = fail)]
+writeLines(fn_pipe_table(dt_tally, "Automated check results by tool on the example run.", "tbl-checks-by-tool"), file.path(dir_out_fragments, "checks_by_tool.md"))
+
+#  - every check
+dt_all = dt_checks[ , .(Tool = tool, Check = fn_cell(check, 60), Severity = severity, Result = result, Observed = fn_cell(observed, 30), Expected = fn_cell(expected, 30))]
+writeLines(fn_pipe_table(dt_all, "Every automated check on the example run, in the order it ran.", "tbl-all-checks"), file.path(dir_out_fragments, "all_checks.md"))
+```
+
+# Step 6: Check the export
+
+Confirms that every tool got a commands piece with at least one command,
+a checks piece with at least one check, and that every figure the
+fragments point to exists.
+
+```{r}
+#| label: step-6-check
+
+#1. every tool has commands and checks
+n_cmd_by_tool = dt_commands[ , .N, by = tool]
+n_chk_by_tool = dt_checks[ , .N, by = tool]
+missing_cmd = setdiff(nms_tools, n_cmd_by_tool$tool)
+missing_chk = setdiff(nms_tools, n_chk_by_tool$tool)
+if(length(missing_cmd) > 0) stop("No commands recorded for: ", paste(missing_cmd, collapse = ", "))
+if(length(missing_chk) > 0) stop("No checks recorded for: ", paste(missing_chk, collapse = ", "))
+
+#2. every figure a fragment points to exists in the manual's figures folder
+paths_fragments = list.files(dir_out_fragments, pattern = "_figures\\.md$", full.names = TRUE)
+lines_fragments = unlist(lapply(paths_fragments, readLines))
+refs = unlist(regmatches(lines_fragments, gregexpr("figures/[a-z-]+\\.png", lines_fragments)))
+missing_fig = refs[!file.exists(file.path(dir_docs_examples, refs))]
+if(length(missing_fig) > 0) stop("Fragments point to missing figures: ", paste(missing_fig, collapse = ", "))
+
+#3. summarize what was written
+data.table::data.table(
+    folder = c("figures", "tables", "fragments")
+  , files  = c(length(list.files(dir_out_figures)), length(list.files(dir_out_tables)), length(list.files(dir_out_fragments)))
+  )
+```
+
+# Session Info
+
+```{r}
+#| label: session-info
+
+sessionInfo()
+```
