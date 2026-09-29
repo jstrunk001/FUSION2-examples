@@ -3,8 +3,7 @@
 
 Example forestry lidar processing workflows and small sample datasets
 demonstrating the [FUSION2](https://github.com/jstrunk001/FUSION2) toolset
--- a modernized C++ reimplementation of the USDA Forest Service FUSION/LTK
-lidar processing suite (originally developed by Bob McGaughey, PNW Research
+-- a suite of Command line tools for processing Lidar point clouds for forest analyses, derived from the [FUSION/LTK](https://github.com/LidarTools/FUSION-LTK) toolset (originally developed by Bob McGaughey, PNW Research
 Station).
 
 This is a companion repository to `FUSION2`, kept separate so example
