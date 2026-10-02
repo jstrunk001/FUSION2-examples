@@ -23,9 +23,10 @@ Built bundles are published as **GitHub Release assets**:
 
 1. Demonstrate FUSION2 command-line tools against real forestry lidar and
    inventory data. `R/analysis/005_example_all_tools.qmd` runs all 15
-   tools on the example lidar tile and checks every output against an
-   independent calculation in R, writing a pass/warn/fail log to
-   `output/tables/all_tools_check_log.csv/`.
+   tools on the example lidar tile, plus `gridmetrics` on surface rasters,
+   `gridmetrics` batch mode, and a three-stage `pipeline` chain, and
+   checks every output against an independent calculation in R, writing
+   a pass/warn/fail log to `output/tables/all_tools_check_log.csv/`.
 2. Provide small, ready-to-run example datasets so a new user can validate
    a FUSION2 build without sourcing their own data first.
 
@@ -65,9 +66,9 @@ Built bundles are published as **GitHub Release assets**:
   raster per non-lidar canopy-height source compared in
   `2026_Compare_DSMs` (Meta AI CHM, WA State NAIP3D photogrammetric DSM,
   NAIP-CHM/NTSG neural-net CHM), for the same site as one of the lidar
-  DTM examples above. Staged for future multi-source example scripts;
-  not currently used by any script in this repo, since `pipeline.exe`
-  only accepts lidar point-cloud/DTM input today.
+  DTM examples above. `R/analysis/005_example_all_tools.qmd` Step 17 runs
+  `gridmetrics` on `naip3d_dsm.tif` (with that site's lidar DTM as the
+  ground) and on `meta_chm.tif`; `naip_chm.tif` is not used yet.
 - `data/confidential/` -- reserved for any true/exact plot coordinates,
   should they ever be needed; gitignored and blocked at commit time by
   `.git/hooks/pre-commit`. Not expected to be used in this repo.
