@@ -90,6 +90,16 @@ fn_find_fusion_tool = function(tool_name){
   dir_env = Sys.getenv("FUSION2_BIN_DIR")
   path_in_env_dir = file.path(dir_env, tool_name)
   if(nzchar(dir_env) && file.exists(path_in_env_dir)) return(normalizePath(path_in_env_dir, winslash = "/"))
+  candidate_dirs = c(
+      "../FUSION2/bin"
+    , "../../FUSION2/bin"
+    , file.path(Sys.getenv("LOCALAPPDATA"), "FUSION2_build", "bin")
+    , file.path(Sys.getenv("LOCALAPPDATA"), "FUSION2_build_gpu", "bin")
+    )
+  for(candidate_dir in candidate_dirs){
+    path_candidate = file.path(candidate_dir, tool_name)
+    if(file.exists(path_candidate)) return(normalizePath(path_candidate, winslash = "/"))
+    }
   stop(
       "Could not find ", tool_name, ". Build FUSION2 from source "
     , "(https://github.com/jstrunk001/FUSION2) and either add its bin/ "
