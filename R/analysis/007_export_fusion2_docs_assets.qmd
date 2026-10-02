@@ -83,6 +83,21 @@ nms_tools = c(
   , "cloudmetrics", "topometrics", "gridsurfacestats", "canopymaxima"
   , "treeseg", "pipeline"
   )
+
+#5. set the 005 steps that show further ways of running a tool, beyond
+#   its main example
+#  - each gets its own commands, checks, and figures pieces, so the
+#    manual can show it in its own section; the tool's main pieces leave
+#    these steps out
+#  - a figure belongs to a feature when its label starts with the
+#    feature's figure prefix
+dt_features = data.table::data.table(
+    feature    = c("gridmetrics_surface", "gridmetrics_batch", "pipeline_chain")
+  , tool       = c("gridmetrics", "gridmetrics", "pipeline")
+  , step       = c(17L, 18L, 19L)
+  , fig_prefix = c("fig-gridmetrics-surface", "fig-gridmetrics-batch", "fig-pipeline-chain")
+  , what       = c("`gridmetrics` on a surface raster", "`gridmetrics` batch mode", "the `pipeline` chain `canopymodel,canopymaxima,treeseg`")
+  )
 ```
 
 ## Define helper functions used throughout this script
@@ -154,15 +169,23 @@ dir_run = file.path(dir_runs_root, "run", run_folder)
 if(!dir.exists(dir_run)) stop("Run folder not found: ", dir_run)
 
 #3. confirm the two logs come from the same run
-#  - both are stamped when 005's last step runs, so their timestamps
-#    (the trailing _YYYYMMDDHHMMSS) match
+#  - both are written moments apart in 005's last step, so their
+#    timestamps (the trailing _YYYYMMDDHHMMSS) can differ by a second or
+#    two; a 005 run takes minutes, so logs from different runs are much
+#    further apart than the 60 s allowed here
 stamp_commands = sub(".*_([0-9]{14})\\.csv$", "\\1", basename(path_command_log))
 stamp_checks   = sub(".*_([0-9]{14})\\.csv$", "\\1", basename(path_check_log))
-if(stamp_commands != stamp_checks) stop("Command log (", stamp_commands, ") and check log (", stamp_checks, ") come from different 005 runs")
+gap_seconds = abs(as.numeric(difftime(as.POSIXct(stamp_commands, format = "%Y%m%d%H%M%S"), as.POSIXct(stamp_checks, format = "%Y%m%d%H%M%S"), units = "secs")))
+if(is.na(gap_seconds) || gap_seconds > 60) stop("Command log (", stamp_commands, ") and check log (", stamp_checks, ") come from different 005 runs")
 
-#4. every command must have exited cleanly and every hard check passed
-#   before the run is used as the manual's example
-if(any(dt_commands$exit_status != 0)) stop("Some commands in this run did not exit cleanly")
+#4. every command must have exited as expected and every hard check
+#   passed before the run is used as the manual's example
+#  - a command marked expect_error is meant to be refused, so it must
+#    exit with a non-zero status; command logs written before that column
+#    existed expect every command to succeed
+if(!"expect_error" %in% names(dt_commands)) dt_commands[ , expect_error := FALSE]
+exit_as_expected = data.table::fifelse(dt_commands$expect_error, dt_commands$exit_status > 0, dt_commands$exit_status == 0)
+if(!all(exit_as_expected)) stop("Some commands in this run did not exit as expected: ", paste(dt_commands$run_label[!exit_as_expected], collapse = "; "))
 n_failed = dt_checks[result == "fail", .N]
 if(n_failed > 0) stop(n_failed, " hard checks failed in this run; fix them before exporting it to the manual")
 
@@ -221,8 +244,10 @@ dt_figures = data.table::data.table(
   , caption = sub("^#\\| fig-cap: \"(.*)\"$", "\\1", lines_report[idx_label + 1])
   )
 
-#2. name each figure's tool and PNG
+#2. name each figure's tool, feature (if any), and PNG
 dt_figures[ , tool := sub("^fig-([a-z]+).*$", "\\1", label)]
+dt_figures[ , feature := NA_character_]
+for(i in seq_len(nrow(dt_features))) dt_figures[startsWith(label, dt_features$fig_prefix[i]), feature := dt_features$feature[i]]
 dt_figures[ , path_png := file.path(dir_render_figures, paste0(label, "-1.png"))]
 
 #3. every figure in the report must have a PNG and belong to a known tool
@@ -231,7 +256,7 @@ if(length(missing_png) > 0) stop("No PNG rendered for: ", paste(missing_png, col
 unknown_tool = dt_figures[!tool %in% nms_tools, label]
 if(length(unknown_tool) > 0) stop("Figure label does not start with a tool name: ", paste(unknown_tool, collapse = ", "))
 if(any(!grepl("^fig-", dt_figures$label)) || any(grepl("fig-cap", dt_figures$caption))) stop("A figure label is not followed by its caption in the report source")
-print(dt_figures[ , .(label, tool)])
+print(dt_figures[ , .(label, tool, feature)])
 ```
 
 # Step 4: Copy figures and logs into the FUSION2 manual
@@ -273,9 +298,10 @@ print(dt_run_info)
 
 # Step 5: Write the Markdown pieces the manual includes
 
-Writes three pieces per tool (its commands, its checks, and its figures)
-plus three for the appendix (run details, a tally by tool, and every
-check). The manual's chapters live in `docs/tools/`, one folder away
+Writes three pieces per tool (its commands, its checks, and its figures),
+the same three for each further way of running a tool (005 Steps 17-19),
+the `/profile` timings, and three pieces for the appendix (run details, a
+tally by tool, and every check). The manual's chapters live in `docs/tools/`, one folder away
 from `docs/examples/`, so figure paths are written relative to there.
 
 ```{r}
@@ -284,43 +310,72 @@ from `docs/examples/`, so figure paths are written relative to there.
 #1. clear the previous pieces
 unlink(list.files(dir_out_fragments, pattern = "\\.md$", full.names = TRUE))
 
-#2. write each tool's commands, checks, and figures
-for(tool_i in nms_tools){
-  #  - commands: one Command Prompt block, a REM line naming each run
-  dt_cmd_i = dt_commands[tool == tool_i]
-  lines_cmd_i = c("```bat")
-  for(j in seq_len(nrow(dt_cmd_i))){
-    if(j > 1) lines_cmd_i = c(lines_cmd_i, "")
-    lines_cmd_i = c(lines_cmd_i, paste("REM", dt_cmd_i$run_label[j]), fn_command_block(dt_cmd_i$command[j]))
+#2. define a helper that writes one set of commands, checks, and figures
+#   pieces, named <name>_commands.md, <name>_checks.md, <name>_figures.md
+#  - commands: one Command Prompt block, a REM line naming each run
+#  - checks: one numbered table, labelled tbl-checks-<name> with "_"
+#    written as "-"
+#  - figures: one numbered figure per report figure, same caption
+fn_write_pieces = function(name, dt_cmd, dt_chk, dt_fig, what){
+  lines_cmd = c("```bat")
+  for(j in seq_len(nrow(dt_cmd))){
+    if(j > 1) lines_cmd = c(lines_cmd, "")
+    lines_cmd = c(lines_cmd, paste("REM", dt_cmd$run_label[j]), fn_command_block(dt_cmd$command[j]))
     }
-  lines_cmd_i = c(lines_cmd_i, "```", "")
-  writeLines(lines_cmd_i, file.path(dir_out_fragments, paste0(tool_i, "_commands.md")))
+  lines_cmd = c(lines_cmd, "```", "")
+  writeLines(lines_cmd, file.path(dir_out_fragments, paste0(name, "_commands.md")))
 
-  #  - checks: one numbered table
-  dt_chk_i = dt_checks[tool == tool_i, .(
+  dt_chk_out = dt_chk[ , .(
       Check    = fn_cell(check, 70)
     , Result   = result
     , Observed = fn_cell(observed)
     , Expected = fn_cell(expected)
     )]
-  lines_chk_i = fn_pipe_table(
-      dt_chk_i
-    , caption = paste0("Automated checks on the example run of `", tool_i, "`.")
-    , label = paste0("tbl-checks-", tool_i)
+  lines_chk = fn_pipe_table(
+      dt_chk_out
+    , caption = paste0("Automated checks on the example run of ", what, ".")
+    , label = paste0("tbl-checks-", gsub("_", "-", name))
     , widths = c(40, 10, 25, 25)
     )
-  writeLines(lines_chk_i, file.path(dir_out_fragments, paste0(tool_i, "_checks.md")))
+  writeLines(lines_chk, file.path(dir_out_fragments, paste0(name, "_checks.md")))
 
-  #  - figures: one numbered figure per report figure, same caption
-  dt_fig_i = dt_figures[tool == tool_i]
-  lines_fig_i = character(0)
-  for(j in seq_len(nrow(dt_fig_i))){
-    lines_fig_i = c(lines_fig_i, paste0("![", dt_fig_i$caption[j], "](../examples/figures/", dt_fig_i$label[j], ".png){#", dt_fig_i$label[j], "}"), "")
+  lines_fig = character(0)
+  for(j in seq_len(nrow(dt_fig))){
+    lines_fig = c(lines_fig, paste0("![", dt_fig$caption[j], "](../examples/figures/", dt_fig$label[j], ".png){#", dt_fig$label[j], "}"), "")
     }
-  writeLines(lines_fig_i, file.path(dir_out_fragments, paste0(tool_i, "_figures.md")))
+  writeLines(lines_fig, file.path(dir_out_fragments, paste0(name, "_figures.md")))
   }
 
-#3. write the appendix pieces
+#3. write each tool's pieces, leaving out the feature steps
+for(tool_i in nms_tools){
+  fn_write_pieces(
+      tool_i
+    , dt_commands[tool == tool_i & !step %in% dt_features$step]
+    , dt_checks[tool == tool_i & !step %in% dt_features$step]
+    , dt_figures[tool == tool_i & is.na(feature)]
+    , paste0("`", tool_i, "`")
+    )
+  }
+
+#4. write each feature's pieces
+for(i in seq_len(nrow(dt_features))){
+  fn_write_pieces(
+      dt_features$feature[i]
+    , dt_commands[tool == dt_features$tool[i] & step == dt_features$step[i]]
+    , dt_checks[tool == dt_features$tool[i] & step == dt_features$step[i]]
+    , dt_figures[feature == dt_features$feature[i]]
+    , dt_features$what[i]
+    )
+  }
+
+#5. write gridmetrics' /profile timings from the surface-raster run
+dt_profile = data.table::fread(file.path(dir_run, "gridmetrics_dsm", "naip3d_dsm_profile.csv"))
+writeLines(
+    fn_pipe_table(dt_profile[ , .(`Part of the run` = section, Seconds = sprintf("%.3f", seconds))], "Time spent in each part of the example `gridmetrics /profile` run.", "tbl-gridmetrics-profile", widths = c(60, 20))
+  , file.path(dir_out_fragments, "gridmetrics_surface_profile.md")
+  )
+
+#6. write the appendix pieces
 #  - run details
 writeLines(fn_pipe_table(dt_run_info[ , .(Item = item, Value = fn_cell(value, 60))], "The example run the manual's worked examples come from.", "tbl-run-info", widths = c(30, 70)), file.path(dir_out_fragments, "run_info.md"))
 
@@ -337,9 +392,9 @@ writeLines(fn_pipe_table(dt_all, "Every automated check on the example run, in t
 
 # Step 6: Check the export
 
-Confirms that every tool got a commands piece with at least one command,
-a checks piece with at least one check, and that every figure the
-fragments point to exists.
+Confirms that every tool and every feature step got a commands piece with
+at least one command, a checks piece with at least one check, and that
+every figure the fragments point to exists.
 
 ```{r}
 #| label: step-6-check
@@ -351,6 +406,12 @@ missing_cmd = setdiff(nms_tools, n_cmd_by_tool$tool)
 missing_chk = setdiff(nms_tools, n_chk_by_tool$tool)
 if(length(missing_cmd) > 0) stop("No commands recorded for: ", paste(missing_cmd, collapse = ", "))
 if(length(missing_chk) > 0) stop("No checks recorded for: ", paste(missing_chk, collapse = ", "))
+
+#  - every feature step has commands, checks, and at least one figure
+n_feature_cmd = dt_commands[step %in% dt_features$step, .N, by = step]
+n_feature_chk = dt_checks[step %in% dt_features$step, .N, by = step]
+missing_feature = dt_features[!step %in% n_feature_cmd$step | !step %in% n_feature_chk$step | !feature %in% dt_figures$feature, feature]
+if(length(missing_feature) > 0) stop("No commands, checks, or figures recorded for: ", paste(missing_feature, collapse = ", "))
 
 #2. every figure a fragment points to exists in the manual's figures folder
 paths_fragments = list.files(dir_out_fragments, pattern = "_figures\\.md$", full.names = TRUE)

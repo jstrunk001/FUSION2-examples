@@ -185,6 +185,9 @@ fn_check = function(step, tool, check, passed, observed = "", expected = "", sev
 #    the project); an argument holding a space is quoted
 #  - the FUSION2 user manual shows these recorded commands as its
 #    worked examples (see 007_export_fusion2_docs_assets.qmd)
+#  - expect_error = TRUE is for a run that is meant to be refused (for
+#    example, an /extent that misses the data); it then passes only if
+#    the tool exits with a non-zero status
 env_checks$commands = list()
 dir_project = normalizePath(".", winslash = "/")
 fn_portable_args = function(args){
@@ -193,20 +196,25 @@ fn_portable_args = function(args){
   args_in = gsub(paste0(dir_project, "/"), "", args_in, fixed = TRUE)
   ifelse(grepl(" ", args_in, fixed = TRUE), paste0("\"", args_in, "\""), args_in)
   }
-fn_run_tool = function(step, tool, args, run_label){
+fn_run_tool = function(step, tool, args, run_label, expect_error = FALSE){
   cat("\n---", run_label, "---\n", path_tools[[tool]], paste(args, collapse = " "), "\n")
   result = try(system2(path_tools[[tool]], args = args, stdout = TRUE, stderr = TRUE), silent = TRUE)
   exit_status = attr(result, "status")
   exit_status = if(is.null(exit_status)) 0L else exit_status
   if(inherits(result, "try-error")) exit_status = -1L
   cat(paste(result, collapse = "\n"), "\n")
-  fn_check(step, tool, paste0(run_label, ": exits with status 0"), exit_status == 0, exit_status, 0)
+  if(expect_error) {
+    fn_check(step, tool, paste0(run_label, ": stops with a non-zero status"), exit_status > 0, exit_status, "> 0")
+    } else {
+    fn_check(step, tool, paste0(run_label, ": exits with status 0"), exit_status == 0, exit_status, 0)
+    }
   env_checks$commands[[length(env_checks$commands) + 1]] = data.table::data.table(
-      step        = step
-    , tool        = tool
-    , run_label   = run_label
-    , command     = paste(c(tool, fn_portable_args(args)), collapse = " ")
-    , exit_status = exit_status
+      step          = step
+    , tool          = tool
+    , run_label     = run_label
+    , command       = paste(c(tool, fn_portable_args(args)), collapse = " ")
+    , exit_status   = exit_status
+    , expect_error  = expect_error
     )
   invisible(list(exit_status = exit_status, console = as.character(result)))
   }
@@ -317,12 +325,20 @@ same points. Each check asks one of three questions:
 Step 1 reads the tile in R and builds the reference values the later
 steps compare against. Steps 2-16 run one tool each, in the order a real
 workflow would call them: point-cloud tools first, then the ground DEM,
-then the tools that depend on it. Step 17 gathers every check into one
-table.
+then the tools that depend on it. Steps 17-19 cover three ways of running
+the tools beyond a single LAS/LAZ file:
 
-Two groups of tool options are covered by the earlier scripts rather than
-repeated here: `gridmetrics`' batch/tiled mode and SQLite table output
-(001 and 003), and `pipeline`'s many stage chains (003 and 004).
+- Step 17: `gridmetrics` on a surface raster (a photogrammetric DSM or a
+  canopy height model) instead of a point cloud, with `/profile` timing.
+- Step 18: `gridmetrics` batch mode on a folder of point files, with no
+  `/extent`, the ground surface given positionally, and `/strataraster`.
+- Step 19: a `pipeline` chain that builds the canopy model once and feeds
+  both tree tops and crowns, run at two thread counts.
+
+Step 20 gathers every check into one table.
+
+`gridmetrics`' SQLite table output is covered by 001, and `pipeline`'s
+other stage chains by 003 and 004.
 
 # Step 1: Read the tile in R and build reference values
 
@@ -1152,8 +1168,10 @@ if(fn_check_file(15, "treeseg", path_crowns_tif, "segment raster") & fn_check_fi
 # Step 16: Chain tools per tile with `pipeline`
 
 `pipeline` splits the input into tiles with a buffer, runs a chain of
-tools on each tile, and mosaics the results. It needs an explicit
-`/extent` (script 003 Step 2 explains why). The chain here is ground DEM,
+tools on each tile, and mosaics the results. `/extent` is given here so
+the tiles start at the tile's own corner, on the same grid as Step 7's
+single-run canopy model. Without it, `pipeline` uses the input's extent
+snapped outward to the cell size (Step 19). The chain here is ground DEM,
 then canopy model, then tree tops, on four 100 x 100 ft tiles. The
 mosaicked canopy model should match the single-run model from Step 7
 wherever both are plausible.
@@ -1219,16 +1237,407 @@ if(fn_check(16, "pipeline", "combined tree tops table written", length(paths_pl_
   }
 ```
 
-# Step 17: Gather every check into one table
+# Step 17: Compute metrics from a surface raster with `gridmetrics`
 
-This step collects every check from Steps 1-16, prints the failures, and
+`gridmetrics` also accepts a surface raster (GeoTIFF, VRT, IMG, ASCII
+grid) in place of a point cloud. Each valid pixel counts as one return at
+the pixel's centre. With a ground raster, the pixel's height is its
+surface value minus the ground elevation at that point. The run here uses
+a different site from the rest of this script: a 500 x 500 m area of the
+Grays Harbor study site, with a photogrammetric surface model from
+WA State NAIP3D imagery and a USGS lidar ground model. The same area's
+Meta canopy height model, which already holds heights above ground, is
+run with no ground raster. Units here are metres.
+
+`/profile` adds a table of how long each part of the run took. The
+reference values come from `terra`: the same pixel centres, the ground
+model sampled at each one, and the heights grouped into the same 20 m
+cells.
+
+```{r}
+#| label: step-17-gridmetrics-raster
+
+#1. point at the surface rasters and the ground model of the same site
+#  - the NAIP3D surface includes the ground, so it needs a ground model;
+#    the Meta canopy height model already holds heights above ground
+#  - both are 500 x 500 m at 1 m pixels in NAD83 / UTM zone 10N, so the
+#    cell size and /minht below are in metres
+dir_dsm_raw   = file.path("data", "raw", "dsm_source_examples", "site_grays_harbor")
+path_dsm      = normalizePath(file.path(dir_dsm_raw, "naip3d_dsm.tif"), winslash = "/")
+path_chm_meta = normalizePath(file.path(dir_dsm_raw, "meta_chm.tif"), winslash = "/")
+path_dtm_gh   = normalizePath(file.path(dir_dtm_raw, "site_grays_harbor", "usgs_lidar_dtm.tif"), winslash = "/")
+cellsize_dsm = 20
+minht_dsm = 2
+
+#2. run gridmetrics on the NAIP3D surface with the ground model, timed
+#   with /profile
+dir_gm_dsm = file.path(dir_run, "gridmetrics_dsm")
+dir.create(dir_gm_dsm, showWarnings = FALSE)
+path_gm_dsm_table = file.path(dir_gm_dsm, "naip3d_dsm_table.csv")
+res_gm_dsm = fn_run_tool(17, "gridmetrics", c(
+    path_dsm
+  , path_dtm_gh
+  , paste0("/cellsize:", cellsize_dsm)
+  , paste0("/minht:", minht_dsm)
+  , paste0("/outdir:", dir_gm_dsm)
+  , paste0("/output-table:", path_gm_dsm_table)
+  , "/profile"
+  ), "gridmetrics DSM raster")
+
+#3. run gridmetrics on the canopy height model, with no ground model
+path_gm_chm_table = file.path(dir_gm_dsm, "meta_chm_table.csv")
+fn_run_tool(17, "gridmetrics", c(
+    path_chm_meta
+  , paste0("/cellsize:", cellsize_dsm)
+  , paste0("/minht:", minht_dsm)
+  , paste0("/outdir:", dir_gm_dsm)
+  , paste0("/output-table:", path_gm_chm_table)
+  ), "gridmetrics CHM raster")
+
+#4. define a helper that builds R's per-cell reference from a surface
+#   raster
+#  - every valid pixel centre counts as one return, as in gridmetrics
+#  - with a ground model, height = surface value minus the ground model
+#    sampled (bilinear) at the pixel centre; pixels with no ground value
+#    are skipped
+#  - cells are anchored at the raster's top-left corner; Row and Col count
+#    from 0, as in the gridmetrics table
+fn_surface_reference = function(r_surface, r_ground = NULL){
+  xy = terra::xyFromCell(r_surface, seq_len(terra::ncell(r_surface)))
+  h = terra::values(r_surface)[ , 1]
+  if(!is.null(r_ground)) h = h - terra::extract(r_ground, xy, method = "bilinear")[ , 1]
+  r_grid = terra::rast(terra::ext(r_surface), resolution = cellsize_dsm, crs = terra::crs(r_surface))
+  dt_px = data.table::data.table(cell = terra::cellFromXY(r_grid, xy), h = h)
+  dt_px = dt_px[!is.na(h)]
+  dt_ref = dt_px[ , .(
+      n_ref    = .N
+    , max_ref  = if(any(h >= minht_dsm)) max(h[h >= minht_dsm]) else NA_real_
+    , mean_ref = if(any(h >= minht_dsm)) mean(h[h >= minht_dsm]) else NA_real_
+    ), by = cell]
+  dt_ref[ , Row := (cell - 1) %/% terra::ncol(r_grid)]
+  dt_ref[ , Col := (cell - 1) %% terra::ncol(r_grid)]
+  dt_ref
+  }
+
+#5. define a helper that checks one surface-raster run against the
+#   reference: placement, per-cell pixel counts, and height statistics
+fn_check_surface_run = function(label, path_surface, path_tif, path_table, r_ground = NULL, tol){
+  if(!(fn_check_file(17, "gridmetrics", path_tif, paste0(label, ": metrics raster")) & fn_check_file(17, "gridmetrics", path_table, paste0(label, ": metrics table")))) return(invisible(NULL))
+  r_surface = terra::rast(path_surface)
+  r_out = terra::rast(path_tif)
+
+  #  - the grid covers the surface raster's extent, 25 x 25 cells of 20 m
+  n_expected = ceiling(terra::nrow(r_surface) * terra::res(r_surface)[2] / cellsize_dsm)
+  same_ext = all(abs(as.vector(terra::ext(r_out)) - as.vector(terra::ext(r_surface))) < 1e-6)
+  fn_check(17, "gridmetrics", paste0(label, ": grid covers the raster's extent"), same_ext, round(as.vector(terra::ext(r_out)), 1), round(as.vector(terra::ext(r_surface)), 1))
+  fn_check(17, "gridmetrics", paste0(label, ": grid has the expected rows x columns"), all(dim(r_out)[1:2] == n_expected), paste(dim(r_out)[1:2], collapse = "x"), paste(n_expected, n_expected, sep = "x"))
+  fn_check_raster_crs(17, "gridmetrics", r_out, paste0(label, " metrics raster"))
+  fn_check(17, "gridmetrics", paste0(label, ": no intensity bands (a raster has no intensity)"), !any(grepl("^int_", names(r_out))), sum(grepl("^int_", names(r_out))), 0)
+
+  #  - per-cell pixel counts and height statistics against the reference
+  dt_out = data.table::fread(path_table)
+  dt_ref = fn_surface_reference(r_surface, r_ground)
+  dt_cmp = merge(dt_out[ , .(Row, Col, TotalReturns, elev_max, elev_mean)], dt_ref, by = c("Row", "Col"), all = TRUE)
+  dt_cmp[is.na(n_ref), n_ref := 0L]
+  n_count_off = sum(dt_cmp$TotalReturns != dt_cmp$n_ref, na.rm = TRUE) + sum(is.na(dt_cmp$TotalReturns))
+  fn_check(17, "gridmetrics", paste0(label, ": per-cell pixel counts match R"), n_count_off == 0, n_count_off, "0 mismatched cells")
+  dt_hgt = dt_cmp[!is.na(max_ref)]
+  diff_max  = abs(dt_hgt$elev_max - dt_hgt$max_ref)
+  diff_mean = abs(dt_hgt$elev_mean - dt_hgt$mean_ref)
+  fn_check(17, "gridmetrics", paste0(label, ": elev_max matches R in every cell (within ", tol, " m)"), all(diff_max < tol), round(max(diff_max), 4), paste0("< ", tol))
+  fn_check(17, "gridmetrics", paste0(label, ": elev_mean matches R in every cell (within ", tol, " m)"), all(diff_mean < tol), round(max(diff_mean), 4), paste0("< ", tol))
+
+  #  - scatter the tool's per-cell mean height (x) against R's (y)
+  print(
+    ggplot2::ggplot(dt_hgt, ggplot2::aes(x = elev_mean, y = mean_ref)) +
+      ggplot2::geom_abline(slope = 1, intercept = 0, colour = "grey50") +
+      ggplot2::geom_point(alpha = 0.6, size = 1) +
+      ggplot2::coord_fixed(ratio = 1) +
+      ggplot2::labs(title = paste0(label, ": mean height per 20 m cell"), x = "gridmetrics elev_mean (m)", y = "R reference (m)") +
+      ggplot2::theme_minimal(base_size = 11)
+    )
+  invisible(dt_cmp)
+  }
+
+#6. check both runs
+#  - the NAIP3D run's heights depend on the ground model, sampled by both
+#    gridmetrics and terra; 0.01 m allows for rounding between the two
+#    bilinear samplers. The canopy height model's heights are read
+#    straight from the file, so they must match to float precision
+r_dtm_gh = terra::rast(path_dtm_gh)
+dt_cmp_dsm = fn_check_surface_run("DSM raster", path_dsm, file.path(dir_gm_dsm, "naip3d_dsm_gridmetrics.tif"), path_gm_dsm_table, r_ground = r_dtm_gh, tol = 0.01)
+dt_cmp_chm = fn_check_surface_run("CHM raster", path_chm_meta, file.path(dir_gm_dsm, "meta_chm_gridmetrics.tif"), path_gm_chm_table, tol = 0.001)
+
+#7. check the /profile timing table
+#  - every section is listed, and the sections add up to the total (each
+#    is printed to 0.001 s, so six roundings allow 0.003 s of slack)
+nms_profile = c("Read & Decompression", "Spatial Binning & Ground Lookup", "Metric Computation & Statistics", "GeoTIFF Raster & Table I/O", "Setup & Other", "Total Elapsed Time")
+fn_profile_seconds = function(section){
+  line_i = grep(section, res_gm_dsm$console, fixed = TRUE, value = TRUE)[1]
+  as.numeric(sub("^.*\\s([0-9.]+) s\\s.*$", "\\1", line_i))
+  }
+sec_profile = sapply(nms_profile, fn_profile_seconds)
+print(sec_profile)
+
+#  - save the timings as a table so the report can show them
+data.table::fwrite(
+    data.table::data.table(section = nms_profile, seconds = sec_profile)
+  , file.path(dir_gm_dsm, "naip3d_dsm_profile.csv")
+  )
+fn_check(17, "gridmetrics", "/profile: timing table lists every section", all(!is.na(sec_profile)), sum(!is.na(sec_profile)), length(nms_profile))
+if(all(!is.na(sec_profile))) {
+  sec_parts = sum(sec_profile[1:5])
+  fn_check(17, "gridmetrics", "/profile: sections add up to the total (within 0.003 s)", abs(sec_parts - sec_profile[["Total Elapsed Time"]]) <= 0.003, round(sec_parts, 3), round(sec_profile[["Total Elapsed Time"]], 3))
+  }
+```
+
+# Step 18: Process a folder of tiles with `gridmetrics` batch mode
+
+Given a folder instead of a file, `gridmetrics` splits the area into
+tiles, adds a buffer around each, computes the metrics for every tile in
+parallel, and joins the tile rasters into one virtual raster (`.vrt`).
+This step runs batch mode on a folder holding the example tile, in
+100 ft tiles, with four settings:
+
+- **No `/extent`.** The tiles cover the input's own extent, snapped
+  outward to whole cells.
+- **Ground given positionally.** The ground DEM is the second argument,
+  as in single-file mode, not `/ground:`.
+- **`/strataraster`.** The per-layer summaries are written as raster
+  bands as well as table columns.
+- **`/merge`.** The virtual raster is also copied into one GeoTIFF.
+
+Each point must be counted in exactly one tile, even though every tile
+reads a buffer of its neighbours' points. Summed over the whole grid, the
+return counts should equal the tile's point count exactly. A second run
+gives an `/extent` that misses the data; it should stop with an error
+rather than write empty tiles.
+
+```{r}
+#| label: step-18-gridmetrics-batch
+
+#1. put the example tile in a folder of its own
+#  - batch mode reads every LAS/LAZ file in a folder; data/raw/lidar also
+#    holds a tile in another coordinate system, so it can't be used as is
+dir_batch_in = file.path(dir_run, "gridmetrics_batch_input")
+dir.create(dir_batch_in, showWarnings = FALSE)
+file.copy(path_las, dir_batch_in, overwrite = TRUE)
+
+#2. run batch mode with no /extent and the ground DEM given positionally
+dir_gm_batch = file.path(dir_run, "gridmetrics_batch")
+path_gm_batch_table = file.path(dir_gm_batch, "gridmetrics_batch_table.csv")
+cellsize_batch = 10
+res_gm_batch = fn_run_tool(18, "gridmetrics", c(
+    dir_batch_in
+  , path_ground_dem
+  , paste0("/outdir:", dir_gm_batch)
+  , "/tilesize:100,100"
+  , "/buffer:20"
+  , "/threads:2"
+  , paste0("/cellsize:", cellsize_batch)
+  , "/strata:0.5,2,5,10,20"
+  , "/strataraster"
+  , paste0("/output-table:", path_gm_batch_table)
+  , "/merge"
+  ), "gridmetrics batch")
+
+#3. run batch mode with an /extent that misses the tile; it should stop
+#   with an error naming where the files actually are
+res_gm_batch_off = fn_run_tool(18, "gridmetrics", c(
+    dir_batch_in
+  , paste0("/outdir:", file.path(dir_run, "gridmetrics_batch_off"))
+  , "/extent:0,0,1000,1000"
+  , paste0("/cellsize:", cellsize_batch)
+  ), "gridmetrics batch, /extent off the data", expect_error = TRUE)
+fn_check(18, "gridmetrics", "/extent off the data: error message names the files' extent", any(grepl("overlap", res_gm_batch_off$console)), if(any(grepl("overlap", res_gm_batch_off$console))) "message given" else "no message", "message given")
+
+#4. check the extent, band names, and coordinate system of the mosaic
+path_vrt_batch = file.path(dir_gm_batch, "project_gridmetrics.vrt")
+if(fn_check_file(18, "gridmetrics", path_vrt_batch, "batch virtual raster")) {
+  r_batch = terra::rast(path_vrt_batch)
+
+  #  - without /extent, the grid is the tile's bounds snapped outward to
+  #    multiples of the 10 ft cell size
+  ext_batch_expected = c(
+      floor(ext_tile[["xmin"]] / cellsize_batch) * cellsize_batch
+    , ceiling(ext_tile[["xmax"]] / cellsize_batch) * cellsize_batch
+    , floor(ext_tile[["ymin"]] / cellsize_batch) * cellsize_batch
+    , ceiling(ext_tile[["ymax"]] / cellsize_batch) * cellsize_batch
+    )
+  ext_batch = as.vector(terra::ext(r_batch))
+  fn_check(18, "gridmetrics", "no /extent: grid is the input's extent snapped to the cell size", all(abs(ext_batch - ext_batch_expected) < 1e-6), ext_batch, ext_batch_expected)
+  fn_check_raster_crs(18, "gridmetrics", r_batch, "batch virtual raster")
+
+  #  - the virtual raster and the merged GeoTIFF carry the tiles' band
+  #    names, not generic names like project_gridmetrics_1
+  nms_tile_bands = names(terra::rast(file.path(dir_gm_batch, "tile_0001.tif")))
+  fn_check(18, "gridmetrics", "virtual raster band names match the tile rasters'", identical(names(r_batch), nms_tile_bands), paste(head(names(r_batch), 3), collapse = ","), paste(head(nms_tile_bands, 3), collapse = ","))
+  path_merged_batch = file.path(dir_gm_batch, "project_gridmetrics_merged.tif")
+  if(fn_check_file(18, "gridmetrics", path_merged_batch, "/merge GeoTIFF")) {
+    fn_check(18, "gridmetrics", "/merge GeoTIFF band names match the tile rasters'", identical(names(terra::rast(path_merged_batch)), nms_tile_bands), paste(head(names(terra::rast(path_merged_batch)), 3), collapse = ","), paste(head(nms_tile_bands, 3), collapse = ","))
+    }
+
+  #5. check every point is counted once, overall and per cell
+  #  - the reference grid is the expected snapped extent, so a misplaced
+  #    grid would also show up here
+  nms_rcount_b = grep("^r[0-9]count$", names(r_batch), value = TRUE)
+  v_batch_total = rowSums(terra::values(r_batch[[nms_rcount_b]]), na.rm = TRUE)
+  fn_check(18, "gridmetrics", "returns summed over all cells equal the point count", sum(v_batch_total) == n_points, sum(v_batch_total), n_points)
+  r_ref_batch = terra::rast(
+      xmin = ext_batch_expected[1], xmax = ext_batch_expected[2]
+    , ymin = ext_batch_expected[3], ymax = ext_batch_expected[4]
+    , resolution = cellsize_batch, crs = crs_tile_wkt
+    )
+  v_ref_batch = terra::values(terra::rasterize(v_pts, r_ref_batch, fun = "length"))[ , 1]
+  v_ref_batch[is.na(v_ref_batch)] = 0
+  if(terra::ncell(r_batch) == terra::ncell(r_ref_batch)) {
+    fn_check(18, "gridmetrics", "per-cell return counts match R, including along tile seams", all(v_batch_total == v_ref_batch), sum(v_batch_total != v_ref_batch), "0 mismatched cells")
+    }
+
+  #6. check the positional ground DEM was applied
+  #  - with no ground subtracted, elev_max would hold raw elevations,
+  #    far above the tallest point above ground
+  #  - per cell, elev_max should equal R's tallest height above the same
+  #    DEM among points at or above /minht (2 ft)
+  v_batch_max = terra::values(r_batch[["elev_max"]])[ , 1]
+  n_batch_too_tall = sum(v_batch_max > height_limit, na.rm = TRUE)
+  fn_check(18, "gridmetrics", "positional ground applied: no elev_max cell above the tallest point", n_batch_too_tall == 0, paste0(n_batch_too_tall, " cells; max ", round(max(v_batch_max, na.rm = TRUE), 2)), paste0("0 cells above ", round(height_limit, 2), " ft"))
+  keep_minht = !is.na(height_above_fusion_ground) & height_above_fusion_ground >= 2
+  v_pts_minht = terra::vect(cbind(las$X[keep_minht], las$Y[keep_minht]), crs = crs_tile_wkt, atts = data.frame(h = height_above_fusion_ground[keep_minht]))
+  v_ref_max = terra::values(terra::rasterize(v_pts_minht, r_ref_batch, field = "h", fun = max))[ , 1]
+  keep_max = !is.na(v_ref_max) & !is.na(v_batch_max)
+  diff_batch_max = abs(v_batch_max[keep_max] - v_ref_max[keep_max])
+  fn_check(18, "gridmetrics", "elev_max matches R's tallest height per cell (median under 0.1 ft)", stats::median(diff_batch_max) < 0.1, round(stats::median(diff_batch_max), 4), "< 0.1 ft")
+
+  #7. check the /strataraster bands are written in batch mode
+  #  - six layers from five breaks; each cell's layer counts add up to its
+  #    returns
+  nms_stratum_count = grep("^stratum_[0-9]{2}_count$", names(r_batch), value = TRUE)
+  fn_check(18, "gridmetrics", "/strataraster: one count band per height layer", length(nms_stratum_count) == 6, length(nms_stratum_count), 6)
+  if(length(nms_stratum_count) > 0) {
+    v_stratum_sum = rowSums(terra::values(r_batch[[nms_stratum_count]]), na.rm = TRUE)
+    fn_check(18, "gridmetrics", "/strataraster: layer counts add to each cell's returns", all(v_stratum_sum == v_batch_total), sum(v_stratum_sum != v_batch_total), "0 mismatched cells")
+    }
+
+  #8. check the joined table
+  if(fn_check_file(18, "gridmetrics", path_gm_batch_table, "batch table")) {
+    dt_gm_batch = data.table::fread(path_gm_batch_table)
+    fn_check(18, "gridmetrics", "batch table has one row per cell", nrow(dt_gm_batch) == terra::ncell(r_batch), nrow(dt_gm_batch), terra::ncell(r_batch))
+    fn_check(18, "gridmetrics", "batch table's TotalReturns sum to the point count", sum(dt_gm_batch$TotalReturns) == n_points, sum(dt_gm_batch$TotalReturns), n_points)
+    }
+
+  #9. map elev_max from the mosaic
+  print(fn_plot_raster_map(r_batch, "elev_max", "gridmetrics batch mode: elev_max from the joined tiles"))
+  }
+```
+
+# Step 19: Build tree tops and crowns from one canopy model with `pipeline`
+
+A stage that reads a raster uses the most recent raster earlier in the
+chain, not only the stage directly before it. So
+`canopymodel,canopymaxima,treeseg` builds the canopy model once per tile,
+and both `canopymaxima` (tree tops) and `treeseg` (crowns) read it, even
+though `canopymaxima` writes a table. The ground DEM from Step 5 is given
+with `/ground:`, and `/extent` is left out.
+
+The chain runs twice, with 4 worker threads and with 1. Tiles finish in a
+different order at different thread counts, but `pipeline` joins the
+per-tile tables in tile order, so the two runs' tables should be
+identical byte for byte.
+
+```{r}
+#| label: step-19-pipeline-chain
+
+#1. define a helper that runs the chain into its own folder
+fn_run_chain = function(n_threads){
+  dir_out = file.path(dir_run, paste0("pipeline_chain_t", n_threads))
+  fn_run_tool(19, "pipeline", c(
+      "/pipeline:canopymodel,canopymaxima,treeseg"
+    , paste0("/input:", path_las)
+    , paste0("/output:", dir_out)
+    , paste0("/ground:", path_ground_dem)
+    , "/tilesize:100,100"
+    , "/buffer:20"
+    , "/cellsize:3"
+    , "/minht:2"
+    , paste0("/threads:", n_threads)
+    , "/merge"
+    ), paste0("pipeline chain, ", n_threads, if(n_threads == 1) " thread" else " threads"))
+  dir_out
+  }
+
+#2. run the chain with 4 threads, then with 1
+dir_chain_4 = fn_run_chain(4)
+dir_chain_1 = fn_run_chain(1)
+
+#3. check every tile ran each stage once
+#  - without /extent the tiles cover the tile's bounds snapped outward to
+#    the 3 ft cell size, so 100 ft tiles need ceiling(width / 100) per side
+width_chain  = ceiling(ext_tile[["xmax"]] / 3) * 3 - floor(ext_tile[["xmin"]] / 3) * 3
+height_chain = ceiling(ext_tile[["ymax"]] / 3) * 3 - floor(ext_tile[["ymin"]] / 3) * 3
+n_tiles_chain = ceiling(width_chain / 100) * ceiling(height_chain / 100)
+path_chain_state = file.path(dir_chain_4, "_processing", "pipeline_state.csv")
+if(fn_check_file(19, "pipeline", path_chain_state, "chain run state table")) {
+  dt_chain_state = data.table::fread(path_chain_state, colClasses = "character")
+  print(dt_chain_state[ , .N, by = .(stage, status)])
+  dt_stage_runs = dt_chain_state[stage %in% c("canopymodel", "canopymaxima", "treeseg"), .N, by = .(tile, stage)]
+  fn_check(19, "pipeline", "chain accepted: every tile ran canopymodel, canopymaxima, and treeseg", nrow(dt_stage_runs) == 3 * n_tiles_chain, nrow(dt_stage_runs), 3 * n_tiles_chain)
+  fn_check(19, "pipeline", "canopy model built once per tile", all(dt_stage_runs[stage == "canopymodel", N] == 1), max(dt_stage_runs[stage == "canopymodel", N]), 1)
+  fn_check(19, "pipeline", "no tile x stage failed", all(dt_chain_state$status == "done"), paste(unique(dt_chain_state$status), collapse = ","), "done")
+  }
+
+#4. check treeseg read the canopy model
+#  - each tile's crowns are grown on that tile's buffered canopy model
+#    (_processing/<tile>/canopymodel_buffered.tif), so every crown's
+#    maximum height must be one of that raster's heights; the stitched
+#    mosaic can't be used, because 100 ft tiles are not a whole number of
+#    3 ft cells and each tile's grid sits slightly differently
+#  - no crown may exceed the tallest point above ground
+path_chain_chm = file.path(dir_chain_4, "canopymodel_merged.tif")
+path_chain_tops = file.path(dir_chain_4, "canopymaxima_all.csv")
+path_chain_crowns = file.path(dir_chain_4, "treeseg_table_all.csv")
+if(fn_check_file(19, "pipeline", path_chain_chm, "stitched canopy model") & fn_check_file(19, "pipeline", path_chain_tops, "joined tree tops table") & fn_check_file(19, "pipeline", path_chain_crowns, "joined crown table")) {
+  dt_chain_crowns = data.table::fread(path_chain_crowns)
+  dt_chain_crowns[ , tile := sub("^(tile_[0-9]+)_.*$", "\\1", TreeID)]
+  n_not_in_chm = 0
+  for(tile_i in unique(dt_chain_crowns$tile)) {
+    v_chm_i = terra::values(terra::rast(file.path(dir_chain_4, "_processing", tile_i, "canopymodel_buffered.tif")))[ , 1]
+    v_chm_i = unique(round(v_chm_i[!is.na(v_chm_i)], 2))
+    n_not_in_chm = n_not_in_chm + sum(!(round(dt_chain_crowns[tile == tile_i, MaxHeight], 2) %in% v_chm_i))
+    }
+  fn_check(19, "pipeline", "every crown's MaxHeight is a height in its tile's canopy model", n_not_in_chm == 0, n_not_in_chm, "0 crowns")
+  fn_check(19, "pipeline", "no crown exceeds the tallest point above ground", all(dt_chain_crowns$MaxHeight <= height_limit), round(max(dt_chain_crowns$MaxHeight), 2), paste0("<= ", round(height_limit, 2), " ft"))
+  dt_chain_tops = data.table::fread(path_chain_tops)
+  fn_check(19, "pipeline", "no tree top exceeds the tallest point above ground", all(dt_chain_tops$Height <= height_limit), round(max(dt_chain_tops$Height), 2), paste0("<= ", round(height_limit, 2), " ft"))
+
+  #5. check the joined tables list tiles in tile order
+  #  - each TreeID starts with its tile name (tile_0001_7)
+  fn_tile_number = function(tree_id) as.integer(sub("^tile_([0-9]+)_.*$", "\\1", tree_id))
+  fn_check(19, "pipeline", "tree tops table rows are in tile order", !is.unsorted(fn_tile_number(dt_chain_tops$TreeID)), paste(unique(fn_tile_number(dt_chain_tops$TreeID)), collapse = ","), "ascending")
+  fn_check(19, "pipeline", "crown table rows are in tile order", !is.unsorted(fn_tile_number(dt_chain_crowns$TreeID)), paste(unique(fn_tile_number(dt_chain_crowns$TreeID)), collapse = ","), "ascending")
+  }
+
+#6. check the 4-thread and 1-thread runs wrote identical tables
+for(file_i in c("canopymaxima_all.csv", "treeseg_table_all.csv")) {
+  md5_4 = unname(tools::md5sum(file.path(dir_chain_4, file_i)))
+  md5_1 = unname(tools::md5sum(file.path(dir_chain_1, file_i)))
+  fn_check(19, "pipeline", paste0(file_i, ": identical at 4 and 1 threads"), !is.na(md5_4) && identical(md5_4, md5_1), substr(md5_4, 1, 8), substr(md5_1, 1, 8))
+  }
+
+#7. map the stitched canopy model
+if(file.exists(path_chain_chm)) print(fn_plot_raster_map(terra::rast(path_chain_chm), 1, "pipeline chain: stitched canopy model (red = above the height ceiling)", highlight_above = height_limit))
+```
+
+# Step 20: Gather every check into one table
+
+This step collects every check from Steps 1-19, prints the failures, and
 saves the full log as a versioned CSV. The chart shows each tool's pass,
 warn, and fail counts at a glance. Each failed `hard` check is a candidate
 for a unit test in `FUSION2/tests/cpp` that reproduces it before the
 fix.
 
 ```{r}
-#| label: step-17-summary
+#| label: step-20-summary
 
 #1. assemble the log and label each result
 dt_checks = data.table::rbindlist(env_checks$rows)

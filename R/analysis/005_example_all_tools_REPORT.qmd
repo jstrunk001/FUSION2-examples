@@ -42,8 +42,10 @@ that same run. To review an older run, set both parameters, for example:
 
 # How to read this report
 
-Each section below covers one FUSION2 tool, in the order 005 ran them. A
-section has four parts:
+Sections 1-15 cover one FUSION2 tool each, in the order 005 ran them.
+Sections 16-18 cover three further ways of running the tools: `gridmetrics`
+on a surface raster, `gridmetrics` batch mode, and a `pipeline` chain that
+feeds one canopy model to two stages. A section has four parts:
 
 1. **Tool and options** -- the command 005 ran, with file paths shortened.
 2. **What success looks like** -- what to look for in the figure if the
@@ -193,8 +195,10 @@ fn_ground_under = function(r_ground, dt_pts){
 
 #9. define a helper that prints one tool's checks from the check log as a
 #   table, with the result spelled out so it never relies on color alone
-fn_checks = function(tool_in){
-  dt_i = dt_checks[tool == tool_in, .(check, severity, observed, expected, result)]
+#  - steps limits the table to some of 005's steps, for tools that 005
+#    runs in more than one step (gridmetrics, pipeline)
+fn_checks = function(tool_in, steps = NULL){
+  dt_i = dt_checks[tool == tool_in & (is.null(steps) | step %in% steps), .(check, severity, observed, expected, result)]
   dt_i[ , result := data.table::fcase(
       result == "pass", "PASS"
     , result == "warn", "WARN"
@@ -204,8 +208,8 @@ fn_checks = function(tool_in){
   }
 
 #10. define a helper that summarizes one tool's checks in a sentence
-fn_check_line = function(tool_in){
-  dt_i = dt_checks[tool == tool_in]
+fn_check_line = function(tool_in, steps = NULL){
+  dt_i = dt_checks[tool == tool_in & (is.null(steps) | step %in% steps)]
   sprintf(
       "%d checks: %d passed, %d warnings, %d failed."
     , nrow(dt_i), sum(dt_i$result == "pass"), sum(dt_i$result == "warn"), sum(dt_i$result == "fail")
@@ -287,6 +291,11 @@ nms_needed = c(
   , "tree_tops.csv", "crown_segments.tif", "crown_summary.csv"
   , "pipeline/canopymodel_merged.tif", "pipeline/groundfilter_merged.tif"
   , "pipeline/canopymaxima_all.csv", "pipeline/_processing/pipeline_state.csv"
+  , "gridmetrics_dsm/naip3d_dsm_gridmetrics.tif", "gridmetrics_dsm/meta_chm_gridmetrics.tif", "gridmetrics_dsm/naip3d_dsm_profile.csv"
+  , "gridmetrics_batch/project_gridmetrics.vrt"
+  , "pipeline_chain_t4/canopymodel_merged.tif", "pipeline_chain_t4/treeseg_merged.tif", "pipeline_chain_t4/canopymaxima_all.csv"
+  , "pipeline_chain_t4/treeseg_table_all.csv", "pipeline_chain_t4/_processing/pipeline_state.csv"
+  , "pipeline_chain_t1/canopymaxima_all.csv", "pipeline_chain_t1/treeseg_table_all.csv"
   )
 nms_missing = nms_needed[!file.exists(file.path(dir_run, nms_needed))]
 if(length(nms_missing)) stop("Run folder is missing outputs: ", paste(nms_missing, collapse = ", "))
@@ -1020,14 +1029,14 @@ section 4. Six representative bands are shown below.
 - No band is blank. The automated checks confirm this for every band, not
   just the six shown.
 
-**Automated checks.** `r fn_check_line("gridmetrics")`
+**Automated checks.** `r fn_check_line("gridmetrics", steps = 10)`
 
 ```{r}
 #| label: tbl-gridmetrics-checks
 #| tbl-cap: "gridmetrics: automated checks recorded by 005."
 #| echo: false
 
-fn_checks("gridmetrics")
+fn_checks("gridmetrics", steps = 10)
 ```
 
 ```{r}
@@ -1391,14 +1400,14 @@ tile boundaries.
   slightly different spots, and the canopy difference map shows scattered
   large differences at crown edges in the shifted tiles.
 
-**Automated checks.** `r fn_check_line("pipeline")`
+**Automated checks.** `r fn_check_line("pipeline", steps = 16)`
 
 ```{r}
 #| label: tbl-pipeline-checks
 #| tbl-cap: "pipeline: automated checks recorded by 005."
 #| echo: false
 
-fn_checks("pipeline")
+fn_checks("pipeline", steps = 16)
 ```
 
 ```{r}
@@ -1471,6 +1480,191 @@ p_pl_chm_diff = fn_add_seams(fn_map(fn_df_raster(r_chm_diff), "Canopy: stitched 
 p_pl_ground_diff = fn_add_seams(fn_map(fn_df_raster(r_ground_diff_pl), "Ground: stitched minus single run", "ft", scale = "div"))
 patchwork::wrap_plots(p_pl_chm, p_pl_chm_diff, p_pl_ground_diff, ncol = 3) &
   ggplot2::theme(axis.text = ggplot2::element_blank(), axis.title = ggplot2::element_blank(), legend.position = "bottom")
+```
+
+# 16. `gridmetrics` on a surface raster
+
+**Tool and options.**
+`gridmetrics naip3d_dsm.tif usgs_lidar_dtm.tif /cellsize:20 /minht:2 /outdir:gridmetrics_dsm /output-table:gridmetrics_dsm/naip3d_dsm_table.csv /profile`,
+then `gridmetrics meta_chm.tif /cellsize:20 /minht:2 /outdir:gridmetrics_dsm /output-table:gridmetrics_dsm/meta_chm_table.csv`
+
+This section uses a different site from the rest of the report: a
+500 x 500 m area of the Grays Harbor study site, in metres. The first run
+reads a photogrammetric surface model built from WA State NAIP3D imagery
+and subtracts a USGS lidar ground model. The second reads the Meta canopy
+height model of the same area, which already holds heights above ground,
+so it takes no ground model. Each 1 m pixel counts as one return.
+
+**What success looks like.**
+
+- Every 20 m cell holds a value; no row or column of the grid is blank.
+- The two sources show the same tall stands. The Meta model, which a
+  Meta AI model predicts from imagery, runs lower than the NAIP3D
+  surface across most of this site, so the difference map is mostly
+  positive. The gap is widest in the short vegetation across the middle
+  of the area, where the Meta model reads close to zero and the NAIP3D
+  surface shows several metres of height.
+- The timing table lists every part of the run.
+
+**Automated checks.** `r fn_check_line("gridmetrics", steps = 17)`
+
+```{r}
+#| label: tbl-gridmetrics-surface-checks
+#| tbl-cap: "gridmetrics on a surface raster: automated checks recorded by 005."
+#| echo: false
+
+fn_checks("gridmetrics", steps = 17)
+```
+
+```{r}
+#| label: tbl-gridmetrics-surface-profile
+#| tbl-cap: "gridmetrics /profile: time spent in each part of the NAIP3D run."
+#| echo: false
+
+#1. show the /profile timings 005 saved
+dt_profile = data.table::fread(file.path(dir_run, "gridmetrics_dsm", "naip3d_dsm_profile.csv"))
+knitr::kable(dt_profile, col.names = c("Part of the run", "Seconds"), digits = 3)
+```
+
+```{r}
+#| label: fig-gridmetrics-surface
+#| fig-cap: "gridmetrics on surface rasters: 95th percentile height per 20 m cell from the NAIP3D surface minus the lidar ground (left) and from the Meta canopy height model (middle), and their difference (right)."
+#| fig-height: 4.5
+
+#1. read the two metric rasters and difference their 95th percentiles
+r_gm_naip = terra::rast(file.path(dir_run, "gridmetrics_dsm", "naip3d_dsm_gridmetrics.tif"))
+r_gm_meta = terra::rast(file.path(dir_run, "gridmetrics_dsm", "meta_chm_gridmetrics.tif"))
+x0_site = terra::xmin(r_gm_naip)
+y0_site = terra::ymin(r_gm_naip)
+r_p95_diff = r_gm_naip[["elev_p95"]] - r_gm_meta[["elev_p95"]]
+
+#2. map both on one height scale, and the difference around zero
+lim_p95 = range(c(terra::values(r_gm_naip[["elev_p95"]]), terra::values(r_gm_meta[["elev_p95"]])), na.rm = TRUE)
+p_naip = fn_map(fn_df_raster(r_gm_naip, "elev_p95", x0_site, y0_site), "NAIP3D minus ground", "p95 (m)", limits = lim_p95)
+p_meta = fn_map(fn_df_raster(r_gm_meta, "elev_p95", x0_site, y0_site), "Meta CHM", "p95 (m)", limits = lim_p95)
+p_diff = fn_map(fn_df_raster(r_p95_diff, 1, x0_site, y0_site), "NAIP3D minus Meta", "m", scale = "div")
+patchwork::wrap_plots(p_naip, p_meta, p_diff, ncol = 3) &
+  ggplot2::theme(axis.text = ggplot2::element_blank(), axis.title = ggplot2::element_blank(), legend.position = "bottom")
+```
+
+# 17. `gridmetrics` batch mode on a folder of tiles
+
+**Tool and options.**
+`gridmetrics gridmetrics_batch_input ground_dem.tif /outdir:gridmetrics_batch /tilesize:100,100 /buffer:20 /threads:2 /cellsize:10 /strata:0.5,2,5,10,20 /strataraster /output-table:gridmetrics_batch/gridmetrics_batch_table.csv /merge`
+
+Batch mode runs on a folder holding the example tile. No `/extent` is
+given, so the grid covers the tile's bounds snapped outward to whole
+10 ft cells, which takes nine 100 ft tiles. The ground surface is the
+second argument rather than `/ground:`. Dashed lines mark the tile
+boundaries.
+
+**What success looks like.**
+
+- Maximum height follows the same crown pattern as section 9's
+  single-file run, in heights above ground, not raw elevations.
+- The return count map shows no stripe along the dashed lines. A stripe
+  of high counts would mean points near a seam were counted by both
+  neighbouring tiles.
+
+**Automated checks.** `r fn_check_line("gridmetrics", steps = 18)`
+
+```{r}
+#| label: tbl-gridmetrics-batch-checks
+#| tbl-cap: "gridmetrics batch mode: automated checks recorded by 005."
+#| echo: false
+
+fn_checks("gridmetrics", steps = 18)
+```
+
+```{r}
+#| label: fig-gridmetrics-batch
+#| fig-cap: "gridmetrics batch mode: maximum height (left) and returns per 10 ft cell (right) from the joined tiles. Dashed lines mark tile boundaries."
+#| fig-height: 5
+
+#1. read the joined virtual raster and total the returns per cell
+r_gm_batch = terra::rast(file.path(dir_run, "gridmetrics_batch", "project_gridmetrics.vrt"))
+nms_rcount_batch = grep("^r[0-9]count$", names(r_gm_batch), value = TRUE)
+r_batch_returns = sum(r_gm_batch[[nms_rcount_batch]], na.rm = TRUE)
+
+#2. place the tile boundaries: 100 ft tiles from the grid's own corner
+x_seams_batch = seq(terra::xmin(r_gm_batch) + 100, terra::xmax(r_gm_batch) - 1, by = 100) - x0
+y_seams_batch = seq(terra::ymin(r_gm_batch) + 100, terra::ymax(r_gm_batch) - 1, by = 100) - y0
+fn_add_batch_seams = function(p){
+  p +
+    ggplot2::geom_vline(xintercept = x_seams_batch, linetype = "dashed", linewidth = 0.4) +
+    ggplot2::geom_hline(yintercept = y_seams_batch, linetype = "dashed", linewidth = 0.4)
+  }
+
+#3. map both
+p_batch_max = fn_add_batch_seams(fn_map(fn_df_raster(r_gm_batch, "elev_max"), "Maximum height", "ft"))
+p_batch_n   = fn_add_batch_seams(fn_map(fn_df_raster(r_batch_returns), "Returns per cell", "returns"))
+patchwork::wrap_plots(p_batch_max, p_batch_n, ncol = 2) &
+  ggplot2::theme(legend.position = "bottom")
+```
+
+# 18. `pipeline`: one canopy model for tree tops and crowns
+
+**Tool and options.**
+`pipeline /pipeline:canopymodel,canopymaxima,treeseg /input:<tile> /output:pipeline_chain_t4 /ground:ground_dem.tif /tilesize:100,100 /buffer:20 /cellsize:3 /minht:2 /threads:4 /merge`,
+then the same with `/threads:1` into `pipeline_chain_t1`
+
+`treeseg` reads the canopy model that `canopymodel` built earlier in the
+chain, even though `canopymaxima` sits between them, so each tile's
+canopy model is built once for both. No `/extent` is given. The run is
+repeated with one thread to confirm the joined tables come out the same.
+
+**What success looks like.**
+
+- Every tile ran each of the three stages once.
+- Crown outlines surround the tree tops, and most crowns hold one top.
+- The 4-thread and 1-thread runs wrote identical tables.
+
+**Automated checks.** `r fn_check_line("pipeline", steps = 19)`
+
+```{r}
+#| label: tbl-pipeline-chain-checks
+#| tbl-cap: "pipeline chain: automated checks recorded by 005."
+#| echo: false
+
+fn_checks("pipeline", steps = 19)
+```
+
+```{r}
+#| label: tbl-pipeline-chain-state
+#| tbl-cap: "pipeline chain: tiles in each stage and status, from the run state table."
+#| echo: false
+
+#1. tally the run state table by stage and status
+dt_chain_state = data.table::fread(file.path(dir_run, "pipeline_chain_t4", "_processing", "pipeline_state.csv"), colClasses = "character")
+knitr::kable(dt_chain_state[ , .(tiles = data.table::uniqueN(tile), runs = .N), by = .(stage, status)], col.names = c("Stage", "Status", "Tiles", "Runs"))
+```
+
+```{r}
+#| label: fig-pipeline-chain
+#| fig-cap: "pipeline chain: stitched canopy model with treeseg crown outlines (orange) and canopymaxima tree tops (aqua). Dashed lines mark tile boundaries."
+#| fig-height: 7
+
+#1. read the stitched canopy model, crown raster, and tree tops
+r_chain_chm = terra::rast(file.path(dir_run, "pipeline_chain_t4", "canopymodel_merged.tif"))
+r_chain_crowns = terra::rast(file.path(dir_run, "pipeline_chain_t4", "treeseg_merged.tif"))
+dt_chain_tops = data.table::fread(file.path(dir_run, "pipeline_chain_t4", "canopymaxima_all.csv"))
+dt_chain_tops[ , x := X - x0]
+dt_chain_tops[ , y := Y - y0]
+
+#2. outline the crowns and place the tile boundaries
+#  - crown IDs restart in each tile, so a crown's outline can include
+#    parts in other tiles with the same ID; outlining each region's own
+#    edge is unaffected
+dt_chain_outlines = fn_outline_paths(r_chain_crowns)
+x_seams_chain = seq(terra::xmin(r_chain_chm) + 100, terra::xmax(r_chain_chm) - 1, by = 100) - x0
+y_seams_chain = seq(terra::ymin(r_chain_chm) + 100, terra::ymax(r_chain_chm) - 1, by = 100) - y0
+
+#3. draw the canopy, outlines, tops, and boundaries
+fn_map(fn_df_raster(r_chain_chm), sprintf("Stitched canopy, %d tree tops", nrow(dt_chain_tops)), "height (ft)") +
+  ggplot2::geom_path(data = dt_chain_outlines, ggplot2::aes(x = x, y = y, group = path_id), inherit.aes = FALSE, colour = col_orange, linewidth = 0.4) +
+  ggplot2::geom_point(data = dt_chain_tops, ggplot2::aes(x = x, y = y), inherit.aes = FALSE, shape = 21, fill = col_aqua, colour = "white", size = 1.6, stroke = 0.5) +
+  ggplot2::geom_vline(xintercept = x_seams_chain, linetype = "dashed", linewidth = 0.4) +
+  ggplot2::geom_hline(yintercept = y_seams_chain, linetype = "dashed", linewidth = 0.4)
 ```
 
 ```{=html}
