@@ -345,7 +345,12 @@ the tools beyond a single LAS/LAZ file:
 - Step 19: a `pipeline` chain that builds the canopy model once and feeds
   both tree tops and crowns, run at two thread counts.
 
-Step 20 gathers every check into one table.
+Step 20 reruns `filterdata`, `clipdata`, `canopymodel`, `cloudmetrics`, and
+`gridmetrics` with `/zmult` and `/zshift` (feet to meters, plus a datum
+shift) and with `/zmult_ground` and `/zshift_ground` (a ground DEM in
+meters), and compares each result with its feet counterpart.
+
+Step 21 gathers every check into one table.
 
 `gridmetrics`' SQLite table output is covered by 001, and `pipeline`'s
 other stage chains by 003 and 004.
@@ -1638,16 +1643,184 @@ for(file_i in c("canopymaxima_all.csv", "treeseg_table_all.csv")) {
 if(file.exists(path_chain_chm)) print(fn_plot_raster_map(terra::rast(path_chain_chm), 1, "pipeline chain: stitched canopy model (red = above the height ceiling)", highlight_above = height_limit))
 ```
 
-# Step 20: Gather every check into one table
+# Step 20: Convert vertical units with `/zmult`, `/zshift`, `/zmult_ground`, and `/zshift_ground`
 
-This step collects every check from Steps 1-19, prints the failures, and
+Most tools accept `/zmult` and `/zshift`, which turn every final
+elevation or height into `value * zmult + zshift`. Height and elevation
+limits (`/minz`, `/maxz`, `/minht`) are written in the converted units.
+This tile is in feet, so `/zmult:0.3048` reports meters. `/zmult_ground`
+and `/zshift_ground` do the same for a `/ground` raster that is in
+different units than the points, before the ground is subtracted. A
+meters version of the ground DEM is built in R and used to show that a
+ground raster in meters gives the same feet heights as the original.
+
+Each run below is compared with the feet result from an earlier step, so
+agreement means the conversion was applied once, to the right values, and
+before the limits.
+
+```{r}
+#| label: step-20-zmult
+
+dir_z = file.path(dir_run, "zmult")
+dir.create(dir_z, showWarnings = FALSE)
+ft_to_m = 0.3048
+m_to_ft = 1 / ft_to_m
+
+#1. filterdata: keep an elevation band written in meters, with a datum shift
+#  - the band is the Step 3 band, converted the same way as the points:
+#    elevation_out = elevation_ft * 0.3048 - 100
+z_shift_m = -100
+z_band_m = z_band * ft_to_m + z_shift_m
+path_filter_m = file.path(dir_z, "filterdata_meters.las")
+fn_run_tool(20, "filterdata", c(
+    path_las
+  , paste0("/output:", path_filter_m)
+  , paste0("/zmult:", ft_to_m)
+  , paste0("/zshift:", z_shift_m)
+  , paste0("/minz:", z_band_m[1])
+  , paste0("/maxz:", z_band_m[2])
+  ), "filterdata /zmult /zshift")
+z_m_ref = las$Z * ft_to_m + z_shift_m
+is_kept_ref = z_m_ref >= z_band_m[1] & z_m_ref <= z_band_m[2]
+las_filter_m = fn_read_las(path_filter_m)
+if(fn_check(20, "filterdata", "/zmult /zshift: output readable", !is.null(las_filter_m), if(is.null(las_filter_m)) "unreadable" else "ok", "ok")) {
+  fn_check(20, "filterdata", "/zmult /zshift: kept count within 3 points of R (points on the band edge can differ)", abs(lidR::npoints(las_filter_m) - sum(is_kept_ref)) <= 3, lidR::npoints(las_filter_m), sum(is_kept_ref))
+  fn_check(20, "filterdata", "/zmult /zshift: written elevations are the converted values", abs(mean(las_filter_m$Z) - mean(z_m_ref[is_kept_ref])) < 0.01, round(mean(las_filter_m$Z), 3), round(mean(z_m_ref[is_kept_ref]), 3))
+  fn_check(20, "filterdata", "/zmult /zshift: every kept elevation is inside the band given in meters", all(las_filter_m$Z >= z_band_m[1] - 0.01 & las_filter_m$Z <= z_band_m[2] + 0.01), round(range(las_filter_m$Z), 3), round(z_band_m, 3))
+  fn_check(20, "filterdata", "/zmult /zshift: X is not changed", abs(mean(las_filter_m$X) - mean(las$X[is_kept_ref])) < 1, round(mean(las_filter_m$X), 2), round(mean(las$X[is_kept_ref]), 2))
+  }
+
+#2. clipdata: clip the Step 6 box by height above ground, with limits in meters
+#  - 2 and 200 ft above ground become 0.6096 and 60.96 m, so the count
+#    should match the Step 6 feet run
+path_clip_ht_m = file.path(dir_z, "clipdata_box_height_meters.las")
+fn_run_tool(20, "clipdata", c(
+    path_las
+  , paste0("/output:", path_clip_ht_m)
+  , arg_box
+  , paste0("/ground:", path_ground_dem)
+  , paste0("/zmult:", ft_to_m)
+  , paste0("/minz:", 2 * ft_to_m)
+  , paste0("/maxz:", 200 * ft_to_m)
+  ), "clipdata /zmult")
+las_clip_ht_m = fn_read_las(path_clip_ht_m)
+if(fn_check(20, "clipdata", "/zmult: output readable", !is.null(las_clip_ht_m), if(is.null(las_clip_ht_m)) "unreadable" else "ok", "ok")) {
+  fn_check(20, "clipdata", "/zmult: kept count within 3 points of the feet run in Step 6", abs(lidR::npoints(las_clip_ht_m) - lidR::npoints(las_clip_ht)) <= 3, lidR::npoints(las_clip_ht_m), lidR::npoints(las_clip_ht))
+  fn_check(20, "clipdata", "/zmult: written point elevations are in meters", abs(stats::median(las_clip_ht_m$Z) - stats::median(las_clip_ht$Z) * ft_to_m) < 0.01, round(stats::median(las_clip_ht_m$Z), 3), round(stats::median(las_clip_ht$Z) * ft_to_m, 3))
+  }
+
+#3. canopymodel: build the canopy height model in meters
+path_chm_m = file.path(dir_z, "chm_meters.tif")
+fn_run_tool(20, "canopymodel", c(args_chm_common, paste0("/output:", path_chm_m), paste0("/zmult:", ft_to_m)), "canopymodel /zmult")
+if(fn_check_file(20, "canopymodel", path_chm_m, "/zmult CHM")) {
+  v_chm_m = terra::values(terra::rast(path_chm_m))[ , 1]
+  fn_check(20, "canopymodel", "/zmult: same cells filled as the feet model", identical(is.na(v_chm_m), is.na(v_chm)), sum(is.na(v_chm_m)), sum(is.na(v_chm)))
+  diff_chm_m = max(abs(v_chm_m - v_chm * ft_to_m), na.rm = TRUE)
+  fn_check(20, "canopymodel", "/zmult: every cell equals the feet model * 0.3048 (within 0.01 m)", diff_chm_m < 0.01, round(diff_chm_m, 5), "< 0.01 m")
+  }
+
+#4. build a meters copy of the ground DEM
+#  - the copy has the same grid and coordinate system as the feet DEM, with
+#    elevations in meters
+r_ground_m = r_ground * ft_to_m
+path_ground_dem_m = file.path(dir_z, "ground_dem_meters.tif")
+terra::writeRaster(r_ground_m, path_ground_dem_m, overwrite = TRUE, datatype = "FLT4S")
+
+#5. canopymodel: a ground DEM in meters, converted back with /zmult_ground
+#  - heights stay in feet, so the model should match the Step 7 model
+path_chm_gm = file.path(dir_z, "chm_ground_meters.tif")
+fn_run_tool(20, "canopymodel", c(
+    path_las
+  , paste0("/ground:", path_ground_dem_m)
+  , paste0("/cellsize:", cellsize_chm)
+  , paste0("/output:", path_chm_gm)
+  , paste0("/zmult_ground:", m_to_ft)
+  ), "canopymodel /zmult_ground")
+if(fn_check_file(20, "canopymodel", path_chm_gm, "/zmult_ground CHM")) {
+  v_chm_gm = terra::values(terra::rast(path_chm_gm))[ , 1]
+  diff_chm_gm = max(abs(v_chm_gm - v_chm), na.rm = TRUE)
+  fn_check(20, "canopymodel", "/zmult_ground: meters ground gives the feet CHM (within 0.01 ft)", diff_chm_gm < 0.01, round(diff_chm_gm, 5), "< 0.01 ft")
+  }
+
+#6. canopymodel: add a constant to the ground with /zshift_ground
+#  - raising the ground by 5 ft lowers every cell that has points by 5 ft
+path_chm_gs = file.path(dir_z, "chm_ground_shift.tif")
+fn_run_tool(20, "canopymodel", c(args_chm_common, paste0("/output:", path_chm_gs), "/zshift_ground:5"), "canopymodel /zshift_ground")
+if(fn_check_file(20, "canopymodel", path_chm_gs, "/zshift_ground CHM")) {
+  v_chm_gs = terra::values(terra::rast(path_chm_gs))[ , 1]
+  diff_chm_gs = max(abs(v_chm_gs - (v_chm - 5)), na.rm = TRUE)
+  fn_check(20, "canopymodel", "/zshift_ground:5 lowers every cell by 5 ft", diff_chm_gs < 0.01, round(diff_chm_gs, 5), "< 0.01 ft")
+  }
+
+#7. cloudmetrics: whole-tile metrics in meters
+#  - /minht is given in meters, so 2 ft becomes 0.6096 m and the same
+#    points count as canopy; every height statistic is the feet value * 0.3048
+path_cm_tile_m = file.path(dir_z, "cloudmetrics_tile_meters.csv")
+fn_run_tool(20, "cloudmetrics", c(
+    path_las
+  , paste0("/ground:", path_ground_dem)
+  , paste0("/output:", path_cm_tile_m)
+  , paste0("/minht:", 2 * ft_to_m)
+  , paste0("/zmult:", ft_to_m)
+  ), "cloudmetrics /zmult")
+if(fn_check_file(20, "cloudmetrics", path_cm_tile_m, "/zmult metrics CSV")) {
+  dt_cm_tile_m = data.table::fread(path_cm_tile_m)
+  fn_check(20, "cloudmetrics", "/zmult: total points unchanged", dt_cm_tile_m$TotalPoints == dt_cm_tile$TotalPoints, dt_cm_tile_m$TotalPoints, dt_cm_tile$TotalPoints)
+  fn_check(20, "cloudmetrics", "/zmult: canopy points (above 2 ft = 0.6096 m) within 3 of the feet run", abs(dt_cm_tile_m$CanopyPoints - dt_cm_tile$CanopyPoints) <= 3, dt_cm_tile_m$CanopyPoints, dt_cm_tile$CanopyPoints)
+  fn_check(20, "cloudmetrics", "/zmult: elev_max is the feet value * 0.3048 (within 0.01 m)", abs(dt_cm_tile_m$elev_max - dt_cm_tile$elev_max * ft_to_m) < 0.01, round(dt_cm_tile_m$elev_max, 3), round(dt_cm_tile$elev_max * ft_to_m, 3))
+  }
+
+#8. cloudmetrics: a meters ground DEM and meters output together
+#  - /zmult_ground brings the ground to feet before it is subtracted, then
+#    /zmult converts the height to meters, so the result equals step 7
+path_cm_tile_gm = file.path(dir_z, "cloudmetrics_tile_ground_meters.csv")
+fn_run_tool(20, "cloudmetrics", c(
+    path_las
+  , paste0("/ground:", path_ground_dem_m)
+  , paste0("/output:", path_cm_tile_gm)
+  , paste0("/minht:", 2 * ft_to_m)
+  , paste0("/zmult_ground:", m_to_ft)
+  , paste0("/zmult:", ft_to_m)
+  ), "cloudmetrics /zmult_ground /zmult")
+if(fn_check_file(20, "cloudmetrics", path_cm_tile_gm, "/zmult_ground /zmult metrics CSV")) {
+  dt_cm_tile_gm = data.table::fread(path_cm_tile_gm)
+  fn_check(20, "cloudmetrics", "/zmult_ground /zmult: elev_max equals the meters run (within 0.01 m)", abs(dt_cm_tile_gm$elev_max - dt_cm_tile_m$elev_max) < 0.01, round(dt_cm_tile_gm$elev_max, 3), round(dt_cm_tile_m$elev_max, 3))
+  }
+
+#9. gridmetrics: the Step 10 grid in meters
+dir_gm_m = file.path(dir_z, "gridmetrics_meters")
+dir.create(dir_gm_m, showWarnings = FALSE)
+fn_run_tool(20, "gridmetrics", c(
+    path_las
+  , path_ground_dem
+  , "/cellsize:10"
+  , paste0("/outdir:", dir_gm_m)
+  , paste0("/minht:", 2 * ft_to_m)
+  , paste0("/zmult:", ft_to_m)
+  ), "gridmetrics /zmult")
+path_gm_tif_m = list.files(dir_gm_m, pattern = "_gridmetrics\\.tif$", full.names = TRUE)[1]
+if(fn_check_file(20, "gridmetrics", if(is.na(path_gm_tif_m)) file.path(dir_gm_m, "missing_gridmetrics.tif") else path_gm_tif_m, "/zmult metrics raster")) {
+  r_gm_m = terra::rast(path_gm_tif_m)
+  v_gm_max_m = terra::values(r_gm_m[["elev_max"]])[ , 1]
+  same_grid = terra::ncell(r_gm_m) == terra::ncell(r_gm)
+  fn_check(20, "gridmetrics", "/zmult: same grid as the feet run", same_grid, terra::ncell(r_gm_m), terra::ncell(r_gm))
+  if(same_grid) {
+    diff_gm_max = max(abs(v_gm_max_m - v_gm_max * ft_to_m), na.rm = TRUE)
+    fn_check(20, "gridmetrics", "/zmult: elev_max in every cell is the feet value * 0.3048 (within 0.01 m)", diff_gm_max < 0.01, round(diff_gm_max, 5), "< 0.01 m")
+    }
+  }
+```
+
+# Step 21: Gather every check into one table
+
+This step collects every check from Steps 1-20, prints the failures, and
 saves the full log as a versioned CSV. The chart shows each tool's pass,
 warn, and fail counts at a glance. Each failed `hard` check is a candidate
 for a unit test in `FUSION2/tests/cpp` that reproduces it before the
 fix.
 
 ```{r}
-#| label: step-20-summary
+#| label: step-21-summary
 
 #1. assemble the log and label each result
 dt_checks = data.table::rbindlist(env_checks$rows)
